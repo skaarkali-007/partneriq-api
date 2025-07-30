@@ -1,0 +1,2735 @@
+import mongoose from 'mongoose';
+import { User } from '../../models/User';
+import { UserProfile } from '../../models/UserProfile';
+import { Commission } from '../../models/Commission';
+import { PayoutRequest } from '../../models/PayoutRequest';
+import { PaymentMethod } from '../../models/PaymentMethod';
+import { ReferralLink } from '../../models/ReferralLink';
+import { ClickEvent } from '../../models/ClickEvent';
+import { ConversionEvent } from '../../models/ConversionEvent';
+import { AuditLog } from '../../models/AuditLog';
+import { Consent } from '../../models/Consent';
+import { DataAccessRequest } from '../../models/DataAccessRequest';
+import { logger } from '../../utils/logger';
+
+export interface DataRetentionPolicy {
+  name: string;
+  description: string;
+  retentionPeriodDays: number;
+  dataTypes: string[];
+  anonymizeAfterDays?: number;
+  deleteAfterDays?: number;
+  isActive: boolean;
+}
+
+export interface DataRetentionReport {
+  policyName: string;
+  executedAt: Date;
+  recordsProcessed: number;
+  recordsAnonymized: number;
+  recordsDeleted: number;
+  errors: string[];
+  duration: number;
+}
+
+export interface DataAnonymizationResult {
+  success: boolean;
+  recordsProcessed: number;
+  errors: string[];
+}
+
+/**
+ * Data Retention Service
+ * Implements automated data retention policies and anonymization
+ * in compliance with GDPR requirements
+ */
+export class DataRetentionService {
+  
+  // Default retention policies based on GDPR and business requirements
+  private static readonly DEFAULT_POLICIES: DataRetentionPolicy[] = [
+    {
+      name: 'user_tracking_data',
+      description: 'Click and conversion tracking data retention',
+      retentionPeriodDays: 90, // 3 months for tracking data
+      dataTypes: ['click_events', 'conversion_events'],
+      anonymizeAfterDays: 90,
+      deleteAfterDays: 365, // Keep anonymized for 1 year
+      isActive: true
+    },
+    {
+      name: 'user_profile_data',
+      description: 'User profile and KYC data retention',
+      retentionPeriodDays: 2555, // 7 years for financial compliance
+      dataTypes: ['user_profiles', 'kyc_documents'],
+      anonymizeAfterDays: 1095, // 3 years
+      deleteAfterDays: 2555, // 7 years
+      isActive: true
+    },
+    {
+      name: 'financial_records',
+      description: 'Commission and payout records retention',
+      retentionPeriodDays: 2555, // 7 years for financial records
+      dataTypes: ['commissions', 'payouts', 'payment_methods'],
+      anonymizeAfterDays: 1825, // 5 years
+      deleteAfterDays: 2555, // 7 years
+      isActive: true
+    },
+    {
+      name: 'audit_logs',
+      description: 'System audit logs retention',
+      retentionPeriodDays: 1095, // 3 years for audit logs
+      dataTypes: ['audit_logs'],
+      anonymizeAfterDays: 730, // 2 years
+      deleteAfterDays: 1095, // 3 years
+      isActive: true
+    },
+    {
+      name: 'consent_records',
+      description: 'GDPR consent records retention',
+      retentionPeriodDays: 1095, // 3 years for consent records
+      dataTypes: ['consent_records'],
+      anonymizeAfterDays: 1095,
+      deleteAfterDays: 1095,
+      isActive: true
+    },
+    {
+      name: 'inactive_users',
+      description: 'Inactive user accounts cleanup',
+      retentionPeriodDays: 1095, // 3 years of inactivity
+      dataTypes: ['users'],
+      anonymizeAfterDays: 1095,
+      deleteAfterDays: 1460, // 4 years
+      isActive: true
+    }
+  ];
+
+  /**
+   * Execute all active data retention policies
+   */
+  static async executeRetentionPolicies(): Promise<DataRetentionReport[]> {
+    const reports: DataRetentionReport[] = [];
+    
+    logger.info('Starting data retention policy execution');
+    
+    for (const policy of this.DEFAULT_POLICIES) {
+      if (!policy.isActive) {
+        logger.info(`Skipping inactive policy: ${policy.name}`);
+        continue;
+      }
+      
+      const report = await this.executeSinglePolicy(policy);
+      reports.push(report);
+    }
+    
+    logger.info(`Data retention execution completed. Processed ${reports.length} policies`);
+    return reports;
+  }
+
+  /**
+   * Execute a single retention policy
+   */
+  private static async executeSinglePolicy(policy: DataRetentionPolicy): Promise<DataRetentionReport> {
+    const startTime = Date.now();
+    const report: DataRetentionReport = {
+      policyName: policy.name,
+      executedAt: new Date(),
+      recordsProcessed: 0,
+      recordsAnonymized: 0,
+      recordsDeleted: 0,
+      errors: [],
+      duration: 0
+    };
+
+    try {
+      logger.info(`Executing retention policy: ${policy.name}`);
+      
+      // Log policy execution start
+      await this.logDataProcessingActivity(
+        'system',
+        'retention_policy_started',
+        `Started execution of retention policy: ${policy.name}`,
+        { policy }
+      );
+
+      for (const dataType of policy.dataTypes) {
+        try {
+          const result = await this.processDataType(dataType, policy);
+          report.recordsProcessed += result.recordsProcessed;
+          report.recordsAnonymized += result.recordsAnonymized;
+          report.recordsDeleted += result.recordsDeleted;
+        } catch (error) {
+          const errorMsg = `Error processing data type ${dataType}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+          report.errors.push(errorMsg);
+          logger.error(errorMsg, { error, policy: policy.name, dataType });
+        }
+      }
+
+      // Log policy execution completion
+      await this.logDataProcessingActivity(
+        'system',
+        'retention_policy_completed',
+        `Completed execution of retention policy: ${policy.name}`,
+        { 
+          policy,
+          recordsProcessed: report.recordsProcessed,
+          recordsAnonymized: report.recordsAnonymized,
+          recordsDeleted: report.recordsDeleted,
+          errors: report.errors.length
+        }
+      );
+
+    } catch (error) {
+      const errorMsg = `Failed to execute retention policy ${policy.name}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      report.errors.push(errorMsg);
+      logger.error(errorMsg, { error, policy: policy.name });
+    }
+
+    report.duration = Date.now() - startTime;
+    return report;
+  }
+
+  /**
+   * Process a specific data type according to retention policy
+   */
+  private static async processDataType(
+    dataType: string, 
+    policy: DataRetentionPolicy
+  ): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    switch (dataType) {
+      case 'click_events':
+        return await this.processClickEvents(policy);
+      
+      case 'conversion_events':
+        return await this.processConversionEvents(policy);
+      
+      case 'user_profiles':
+        return await this.processUserProfiles(policy);
+      
+      case 'commissions':
+        return await this.processCommissions(policy);
+      
+      case 'payouts':
+        return await this.processPayouts(policy);
+      
+      case 'payment_methods':
+        return await this.processPaymentMethods(policy);
+      
+      case 'audit_logs':
+        return await this.processAuditLogs(policy);
+      
+      case 'consent_records':
+        return await this.processConsentRecords(policy);
+      
+      case 'users':
+        return await this.processInactiveUsers(policy);
+      
+      default:
+        logger.warn(`Unknown data type for retention processing: ${dataType}`);
+        return result;
+    }
+  }
+
+  /**
+   * Process click events according to retention policy
+   */
+  private static async processClickEvents(policy: DataRetentionPolicy): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    if (policy.anonymizeAfterDays) {
+      const anonymizeDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+      
+      const anonymizeResult = await ClickEvent.updateMany(
+        { 
+          timestamp: { $lt: anonymizeDate },
+          ipAddress: { $ne: '0.0.0.0' } // Not already anonymized
+        },
+        {
+          $set: {
+            ipAddress: '0.0.0.0',
+            userAgent: 'Anonymized',
+            fingerprint: 'anonymized'
+          }
+        }
+      );
+      
+      result.recordsAnonymized = anonymizeResult.modifiedCount;
+      result.recordsProcessed += anonymizeResult.modifiedCount;
+      
+      if (result.recordsAnonymized > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_anonymization',
+          `Anonymized ${result.recordsAnonymized} click events`,
+          { dataType: 'click_events', policy: policy.name }
+        );
+      }
+    }
+    
+    if (policy.deleteAfterDays) {
+      const deleteDate = new Date(Date.now() - policy.deleteAfterDays * 24 * 60 * 60 * 1000);
+      
+      const deleteResult = await ClickEvent.deleteMany({
+        timestamp: { $lt: deleteDate }
+      });
+      
+      result.recordsDeleted = deleteResult.deletedCount || 0;
+      result.recordsProcessed += result.recordsDeleted;
+      
+      if (result.recordsDeleted > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_deletion',
+          `Deleted ${result.recordsDeleted} click events`,
+          { dataType: 'click_events', policy: policy.name }
+        );
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Process conversion events according to retention policy
+   */
+  private static async processConversionEvents(policy: DataRetentionPolicy): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    if (policy.anonymizeAfterDays) {
+      const anonymizeDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+      
+      const anonymizeResult = await ConversionEvent.updateMany(
+        { 
+          conversionTimestamp: { $lt: anonymizeDate },
+          ipAddress: { $ne: '0.0.0.0' } // Not already anonymized
+        },
+        {
+          $set: {
+            ipAddress: '0.0.0.0',
+            userAgent: 'Anonymized',
+            fingerprint: 'anonymized'
+          }
+        }
+      );
+      
+      result.recordsAnonymized = anonymizeResult.modifiedCount;
+      result.recordsProcessed += anonymizeResult.modifiedCount;
+      
+      if (result.recordsAnonymized > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_anonymization',
+          `Anonymized ${result.recordsAnonymized} conversion events`,
+          { dataType: 'conversion_events', policy: policy.name }
+        );
+      }
+    }
+    
+    if (policy.deleteAfterDays) {
+      const deleteDate = new Date(Date.now() - policy.deleteAfterDays * 24 * 60 * 60 * 1000);
+      
+      const deleteResult = await ConversionEvent.deleteMany({
+        conversionTimestamp: { $lt: deleteDate }
+      });
+      
+      result.recordsDeleted = deleteResult.deletedCount || 0;
+      result.recordsProcessed += result.recordsDeleted;
+      
+      if (result.recordsDeleted > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_deletion',
+          `Deleted ${result.recordsDeleted} conversion events`,
+          { dataType: 'conversion_events', policy: policy.name }
+        );
+      }
+    }
+    
+    return result;
+  } 
+ /**
+   * Process user profiles according to retention policy
+   */
+  private static async processUserProfiles(policy: DataRetentionPolicy): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    if (policy.anonymizeAfterDays) {
+      const anonymizeDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+      
+      // Find profiles to anonymize (where user hasn't been active)
+      const profilesToAnonymize = await UserProfile.find({
+        updatedAt: { $lt: anonymizeDate },
+        firstName: { $ne: 'Anonymized User' } // Not already anonymized
+      });
+      
+      for (const profile of profilesToAnonymize) {
+        try {
+          // Check if user is still active or has recent activity
+          const user = await User.findById(profile.userId);
+          if (!user || user.status === 'revoked' || 
+              (user.lastLogin && user.lastLogin < anonymizeDate)) {
+            
+            await UserProfile.findByIdAndUpdate(profile._id, {
+              firstName: 'Anonymized User',
+              lastName: '',
+              phone: '',
+              dateOfBirth: null,
+              address: null,
+              $unset: {
+                kycDocuments: 1,
+                taxId: 1,
+                bankAccountInfo: 1
+              }
+            });
+            
+            result.recordsAnonymized++;
+          }
+        } catch (error) {
+          logger.error(`Error anonymizing user profile ${profile._id}:`, error);
+        }
+      }
+      
+      result.recordsProcessed += profilesToAnonymize.length;
+      
+      if (result.recordsAnonymized > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_anonymization',
+          `Anonymized ${result.recordsAnonymized} user profiles`,
+          { dataType: 'user_profiles', policy: policy.name }
+        );
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Process commissions according to retention policy
+   */
+  private static async processCommissions(policy: DataRetentionPolicy): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    // For financial records, we typically don't delete but may anonymize customer data
+    if (policy.anonymizeAfterDays) {
+      const anonymizeDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+      
+      const commissionsToProcess = await Commission.find({
+        createdAt: { $lt: anonymizeDate },
+        status: { $in: ['paid', 'clawed_back'] } // Only process completed commissions
+      });
+      
+      for (const commission of commissionsToProcess) {
+        try {
+          // Anonymize customer ID but keep commission structure for financial records
+          const anonymizedCustomerId = `anon_${commission._id.toString().slice(-8)}`;
+          
+          await Commission.findByIdAndUpdate(commission._id, {
+            customerId: anonymizedCustomerId
+          });
+          
+          result.recordsAnonymized++;
+        } catch (error) {
+          logger.error(`Error anonymizing commission ${commission._id}:`, error);
+        }
+      }
+      
+      result.recordsProcessed = commissionsToProcess.length;
+      
+      if (result.recordsAnonymized > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_anonymization',
+          `Anonymized ${result.recordsAnonymized} commission records`,
+          { dataType: 'commissions', policy: policy.name }
+        );
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Process payout requests according to retention policy
+   */
+  private static async processPayouts(policy: DataRetentionPolicy): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    // Financial records are typically kept for compliance but can be anonymized
+    if (policy.anonymizeAfterDays) {
+      const anonymizeDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+      
+      const payoutsToProcess = await PayoutRequest.find({
+        createdAt: { $lt: anonymizeDate },
+        status: { $in: ['completed', 'failed'] } // Only process completed payouts
+      });
+      
+      result.recordsProcessed = payoutsToProcess.length;
+      
+      // For payouts, we keep the financial data but may anonymize transaction details
+      // This is typically handled at the payment method level
+      
+      if (result.recordsProcessed > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_retention_check',
+          `Processed ${result.recordsProcessed} payout records for retention`,
+          { dataType: 'payouts', policy: policy.name }
+        );
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Process payment methods according to retention policy
+   */
+  private static async processPaymentMethods(policy: DataRetentionPolicy): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    if (policy.anonymizeAfterDays) {
+      const anonymizeDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+      
+      // Find payment methods that haven't been used recently
+      const paymentMethodsToProcess = await PaymentMethod.find({
+        updatedAt: { $lt: anonymizeDate }
+      });
+      
+      for (const paymentMethod of paymentMethodsToProcess) {
+        try {
+          // Check if there are recent payouts using this payment method
+          const recentPayouts = await PayoutRequest.countDocuments({
+            paymentMethodId: paymentMethod._id,
+            createdAt: { $gte: anonymizeDate }
+          });
+          
+          if (recentPayouts === 0) {
+            // Remove sensitive account details
+            await PaymentMethod.findByIdAndUpdate(paymentMethod._id, {
+              $unset: {
+                accountDetails: 1
+              }
+            });
+            
+            result.recordsAnonymized++;
+          }
+        } catch (error) {
+          logger.error(`Error processing payment method ${paymentMethod._id}:`, error);
+        }
+      }
+      
+      result.recordsProcessed = paymentMethodsToProcess.length;
+      
+      if (result.recordsAnonymized > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_anonymization',
+          `Anonymized ${result.recordsAnonymized} payment methods`,
+          { dataType: 'payment_methods', policy: policy.name }
+        );
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Process audit logs according to retention policy
+   */
+  private static async processAuditLogs(policy: DataRetentionPolicy): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    if (policy.anonymizeAfterDays) {
+      const anonymizeDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+      
+      const anonymizeResult = await AuditLog.updateMany(
+        { 
+          timestamp: { $lt: anonymizeDate },
+          ipAddress: { $ne: '0.0.0.0' } // Not already anonymized
+        },
+        {
+          $set: {
+            ipAddress: '0.0.0.0',
+            userAgent: 'Anonymized'
+          }
+        }
+      );
+      
+      result.recordsAnonymized = anonymizeResult.modifiedCount;
+      result.recordsProcessed += result.recordsAnonymized;
+      
+      if (result.recordsAnonymized > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_anonymization',
+          `Anonymized ${result.recordsAnonymized} audit logs`,
+          { dataType: 'audit_logs', policy: policy.name }
+        );
+      }
+    }
+    
+    if (policy.deleteAfterDays) {
+      const deleteDate = new Date(Date.now() - policy.deleteAfterDays * 24 * 60 * 60 * 1000);
+      
+      // Keep critical audit logs, delete only routine ones
+      const deleteResult = await AuditLog.deleteMany({
+        timestamp: { $lt: deleteDate },
+        action: { 
+          $nin: [
+            'data_deletion', 
+            'data_anonymization', 
+            'retention_policy_started', 
+            'retention_policy_completed',
+            'gdpr_request'
+          ] 
+        }
+      });
+      
+      result.recordsDeleted = deleteResult.deletedCount || 0;
+      result.recordsProcessed += result.recordsDeleted;
+      
+      if (result.recordsDeleted > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_deletion',
+          `Deleted ${result.recordsDeleted} audit logs`,
+          { dataType: 'audit_logs', policy: policy.name }
+        );
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Process consent records according to retention policy
+   */
+  private static async processConsentRecords(policy: DataRetentionPolicy): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    if (policy.anonymizeAfterDays) {
+      const anonymizeDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+      
+      const anonymizeResult = await Consent.updateMany(
+        { 
+          createdAt: { $lt: anonymizeDate },
+          ipAddress: { $ne: '0.0.0.0' } // Not already anonymized
+        },
+        {
+          $set: {
+            ipAddress: '0.0.0.0',
+            userAgent: 'Anonymized'
+          }
+        }
+      );
+      
+      result.recordsAnonymized = anonymizeResult.modifiedCount;
+      result.recordsProcessed += result.recordsAnonymized;
+      
+      if (result.recordsAnonymized > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_anonymization',
+          `Anonymized ${result.recordsAnonymized} consent records`,
+          { dataType: 'consent_records', policy: policy.name }
+        );
+      }
+    }
+    
+    if (policy.deleteAfterDays) {
+      const deleteDate = new Date(Date.now() - policy.deleteAfterDays * 24 * 60 * 60 * 1000);
+      
+      const deleteResult = await Consent.deleteMany({
+        createdAt: { $lt: deleteDate }
+      });
+      
+      result.recordsDeleted = deleteResult.deletedCount || 0;
+      result.recordsProcessed += result.recordsDeleted;
+      
+      if (result.recordsDeleted > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_deletion',
+          `Deleted ${result.recordsDeleted} consent records`,
+          { dataType: 'consent_records', policy: policy.name }
+        );
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Process inactive users according to retention policy
+   */
+  private static async processInactiveUsers(policy: DataRetentionPolicy): Promise<{ recordsProcessed: number; recordsAnonymized: number; recordsDeleted: number }> {
+    const result = { recordsProcessed: 0, recordsAnonymized: 0, recordsDeleted: 0 };
+    
+    if (policy.anonymizeAfterDays) {
+      const inactiveDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+      
+      // Find users who haven't logged in for the specified period
+      const inactiveUsers = await User.find({
+        $or: [
+          { lastLogin: { $lt: inactiveDate } },
+          { lastLogin: { $exists: false }, createdAt: { $lt: inactiveDate } }
+        ],
+        status: { $ne: 'revoked' },
+        firstName: { $ne: 'Anonymized User' } // Not already anonymized
+      });
+      
+      for (const user of inactiveUsers) {
+        try {
+          // Check if user has recent financial activity
+          const recentActivity = await Promise.all([
+            Commission.countDocuments({
+              marketerId: user._id,
+              createdAt: { $gte: inactiveDate }
+            }),
+            PayoutRequest.countDocuments({
+              marketerId: user._id,
+              createdAt: { $gte: inactiveDate }
+            })
+          ]);
+          
+          const hasRecentActivity = recentActivity.some(count => count > 0);
+          
+          if (!hasRecentActivity) {
+            // Anonymize the user account
+            const anonymizedEmail = `anonymized_${Date.now()}_${user._id.toString().slice(-4)}@deleted.local`;
+            
+            await User.findByIdAndUpdate(user._id, {
+              email: anonymizedEmail,
+              firstName: 'Anonymized User',
+              lastName: '',
+              status: 'revoked',
+              $unset: {
+                emailVerificationToken: 1,
+                emailVerificationExpires: 1,
+                passwordResetToken: 1,
+                passwordResetExpires: 1,
+                mfaSecret: 1,
+                mfaBackupCodes: 1
+              }
+            });
+            
+            result.recordsAnonymized++;
+          }
+        } catch (error) {
+          logger.error(`Error processing inactive user ${user._id}:`, error);
+        }
+      }
+      
+      result.recordsProcessed = inactiveUsers.length;
+      
+      if (result.recordsAnonymized > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_anonymization',
+          `Anonymized ${result.recordsAnonymized} inactive user accounts`,
+          { dataType: 'users', policy: policy.name }
+        );
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Get retention policy status and next execution times
+   */
+  static async getRetentionStatus(): Promise<{
+    policies: DataRetentionPolicy[];
+    lastExecution?: Date;
+    nextExecution?: Date;
+    recordsEligibleForProcessing: { [key: string]: number };
+  }> {
+    try {
+      // Get last execution from audit logs
+      const lastExecution = await AuditLog.findOne({
+        action: 'retention_policy_completed'
+      }).sort({ timestamp: -1 });
+
+      // Calculate records eligible for processing
+      const recordsEligible: { [key: string]: number } = {};
+      
+      for (const policy of this.DEFAULT_POLICIES) {
+        if (!policy.isActive) continue;
+        
+        let count = 0;
+        
+        if (policy.anonymizeAfterDays) {
+          const anonymizeDate = new Date(Date.now() - policy.anonymizeAfterDays * 24 * 60 * 60 * 1000);
+          
+          for (const dataType of policy.dataTypes) {
+            switch (dataType) {
+              case 'click_events':
+                count += await ClickEvent.countDocuments({
+                  timestamp: { $lt: anonymizeDate },
+                  ipAddress: { $ne: '0.0.0.0' }
+                });
+                break;
+              case 'conversion_events':
+                count += await ConversionEvent.countDocuments({
+                  conversionTimestamp: { $lt: anonymizeDate },
+                  ipAddress: { $ne: '0.0.0.0' }
+                });
+                break;
+              case 'user_profiles':
+                count += await UserProfile.countDocuments({
+                  updatedAt: { $lt: anonymizeDate },
+                  firstName: { $ne: 'Anonymized User' }
+                });
+                break;
+              case 'users':
+                count += await User.countDocuments({
+                  $or: [
+                    { lastLogin: { $lt: anonymizeDate } },
+                    { lastLogin: { $exists: false }, createdAt: { $lt: anonymizeDate } }
+                  ],
+                  status: { $ne: 'revoked' },
+                  firstName: { $ne: 'Anonymized User' }
+                });
+                break;
+            }
+          }
+        }
+        
+        recordsEligible[policy.name] = count;
+      }
+
+      return {
+        policies: this.DEFAULT_POLICIES,
+        lastExecution: lastExecution?.timestamp,
+        nextExecution: undefined, // This would be set by the job scheduler
+        recordsEligibleForProcessing: recordsEligible
+      };
+    } catch (error) {
+      logger.error('Error getting retention status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Enhanced automated retention policy enforcement
+   * Ensures all policies are properly configured and executed on schedule
+   */
+  static async enforceAutomatedRetention(): Promise<{
+    success: boolean;
+    policiesExecuted: number;
+    totalRecordsProcessed: number;
+    errors: string[];
+    nextScheduledExecution?: Date;
+  }> {
+    try {
+      logger.info('Starting enhanced automated data retention enforcement');
+      
+      const result = {
+        success: true,
+        policiesExecuted: 0,
+        totalRecordsProcessed: 0,
+        errors: [] as string[]
+      };
+
+      // First validate all policies
+      const validationResults = this.DEFAULT_POLICIES.map(policy => ({
+        policy,
+        validation: this.validateRetentionPolicy(policy)
+      }));
+
+      const invalidPolicies = validationResults.filter(r => !r.validation.isValid);
+      if (invalidPolicies.length > 0) {
+        const errorMsg = `Found ${invalidPolicies.length} invalid retention policies`;
+        result.errors.push(errorMsg);
+        logger.error(errorMsg, {
+          invalidPolicies: invalidPolicies.map(p => ({
+            name: p.policy.name,
+            errors: p.validation.errors
+          }))
+        });
+      }
+
+      // Execute valid policies
+      const validPolicies = validationResults
+        .filter(r => r.validation.isValid && r.policy.isActive)
+        .map(r => r.policy);
+
+      for (const policy of validPolicies) {
+        try {
+          const policyReport = await this.executeSinglePolicy(policy);
+          result.policiesExecuted++;
+          result.totalRecordsProcessed += policyReport.recordsProcessed;
+          
+          if (policyReport.errors.length > 0) {
+            result.errors.push(...policyReport.errors);
+          }
+        } catch (error) {
+          const errorMsg = `Failed to execute policy ${policy.name}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+          result.errors.push(errorMsg);
+          logger.error(errorMsg, { error, policyName: policy.name });
+        }
+      }
+
+      // Calculate next scheduled execution (24 hours from now)
+      const nextScheduledExecution = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+      // Log enforcement completion
+      await this.logDataProcessingActivity(
+        'system',
+        'retention_policy_started',
+        'Enhanced automated retention enforcement completed',
+        {
+          policiesExecuted: result.policiesExecuted,
+          totalRecordsProcessed: result.totalRecordsProcessed,
+          errorCount: result.errors.length,
+          nextScheduledExecution
+        }
+      );
+
+      if (result.errors.length > 0) {
+        result.success = false;
+      }
+
+      return {
+        ...result,
+        nextScheduledExecution
+      };
+    } catch (error) {
+      logger.error('Enhanced automated retention enforcement failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Advanced anonymization with configurable strategies
+   */
+  static async advancedAnonymization(
+    dataType: string,
+    anonymizationStrategy: 'full' | 'partial' | 'pseudonymization',
+    criteria: any,
+    options: {
+      batchSize?: number;
+      preserveAnalytics?: boolean;
+      auditTrail?: boolean;
+    } = {}
+  ): Promise<{
+    success: boolean;
+    recordsProcessed: number;
+    anonymizationMethod: string;
+    preservedFields: string[];
+    errors: string[];
+  }> {
+    const {
+      batchSize = 100,
+      preserveAnalytics = false,
+      auditTrail = true
+    } = options;
+
+    const result = {
+      success: true,
+      recordsProcessed: 0,
+      anonymizationMethod: anonymizationStrategy,
+      preservedFields: [] as string[],
+      errors: [] as string[]
+    };
+
+    try {
+      logger.info(`Starting advanced anonymization for ${dataType}`, {
+        strategy: anonymizationStrategy,
+        criteria,
+        options
+      });
+
+      switch (dataType) {
+        case 'click_events':
+          const clickResult = await this.advancedClickEventAnonymization(
+            anonymizationStrategy,
+            criteria,
+            batchSize,
+            preserveAnalytics
+          );
+          Object.assign(result, clickResult);
+          break;
+
+        case 'conversion_events':
+          const conversionResult = await this.advancedConversionEventAnonymization(
+            anonymizationStrategy,
+            criteria,
+            batchSize,
+            preserveAnalytics
+          );
+          Object.assign(result, conversionResult);
+          break;
+
+        case 'user_profiles':
+          const profileResult = await this.advancedUserProfileAnonymization(
+            anonymizationStrategy,
+            criteria,
+            batchSize
+          );
+          Object.assign(result, profileResult);
+          break;
+
+        default:
+          result.success = false;
+          result.errors.push(`Unsupported data type for advanced anonymization: ${dataType}`);
+          return result;
+      }
+
+      if (auditTrail && result.recordsProcessed > 0) {
+        await this.logDataProcessingActivity(
+          'system',
+          'data_anonymization',
+          `Advanced anonymization completed for ${dataType}`,
+          {
+            dataType,
+            strategy: anonymizationStrategy,
+            recordsProcessed: result.recordsProcessed,
+            preservedFields: result.preservedFields,
+            criteria
+          }
+        );
+      }
+
+      return result;
+    } catch (error) {
+      logger.error(`Advanced anonymization failed for ${dataType}`, {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        strategy: anonymizationStrategy
+      });
+      result.success = false;
+      result.errors.push(error instanceof Error ? error.message : 'Unknown error');
+      return result;
+    }
+  }
+
+  /**
+   * Advanced click event anonymization with different strategies
+   */
+  private static async advancedClickEventAnonymization(
+    strategy: 'full' | 'partial' | 'pseudonymization',
+    criteria: any,
+    batchSize: number,
+    preserveAnalytics: boolean
+  ): Promise<{
+    recordsProcessed: number;
+    preservedFields: string[];
+    errors: string[];
+  }> {
+    const result = {
+      recordsProcessed: 0,
+      preservedFields: [] as string[],
+      errors: [] as string[]
+    };
+
+    const events = await ClickEvent.find(criteria).limit(batchSize * 10); // Process in chunks
+    
+    for (let i = 0; i < events.length; i += batchSize) {
+      const batch = events.slice(i, i + batchSize);
+      
+      for (const event of batch) {
+        try {
+          const updateData: any = {};
+
+          switch (strategy) {
+            case 'full':
+              updateData.ipAddress = '0.0.0.0';
+              updateData.userAgent = 'Anonymized';
+              updateData.fingerprint = 'anonymized';
+              updateData.sessionId = 'anonymized';
+              break;
+
+            case 'partial':
+              updateData.ipAddress = '0.0.0.0';
+              updateData.userAgent = 'Anonymized';
+              if (preserveAnalytics) {
+                result.preservedFields.push('fingerprint', 'sessionId');
+              } else {
+                updateData.fingerprint = 'anonymized';
+              }
+              break;
+
+            case 'pseudonymization':
+              const hash = require('crypto').createHash('sha256');
+              updateData.ipAddress = hash.update(event.ipAddress + 'salt').digest('hex').substring(0, 8);
+              updateData.userAgent = 'Pseudonymized';
+              updateData.fingerprint = hash.update(event.fingerprint + 'salt').digest('hex').substring(0, 8);
+              result.preservedFields.push('sessionId');
+              break;
+          }
+
+          await ClickEvent.findByIdAndUpdate(event._id, updateData);
+          result.recordsProcessed++;
+        } catch (error) {
+          result.errors.push(`Failed to anonymize click event ${event._id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Advanced conversion event anonymization
+   */
+  private static async advancedConversionEventAnonymization(
+    strategy: 'full' | 'partial' | 'pseudonymization',
+    criteria: any,
+    batchSize: number,
+    preserveAnalytics: boolean
+  ): Promise<{
+    recordsProcessed: number;
+    preservedFields: string[];
+    errors: string[];
+  }> {
+    const result = {
+      recordsProcessed: 0,
+      preservedFields: [] as string[],
+      errors: [] as string[]
+    };
+
+    const events = await ConversionEvent.find(criteria).limit(batchSize * 10);
+    
+    for (let i = 0; i < events.length; i += batchSize) {
+      const batch = events.slice(i, i + batchSize);
+      
+      for (const event of batch) {
+        try {
+          const updateData: any = {};
+
+          switch (strategy) {
+            case 'full':
+              updateData.ipAddress = '0.0.0.0';
+              updateData.userAgent = 'Anonymized';
+              updateData.customerId = `anon_${event._id.toString().slice(-8)}`;
+              break;
+
+            case 'partial':
+              updateData.ipAddress = '0.0.0.0';
+              updateData.userAgent = 'Anonymized';
+              if (preserveAnalytics) {
+                result.preservedFields.push('customerId', 'initialSpendAmount');
+              } else {
+                updateData.customerId = `anon_${event._id.toString().slice(-8)}`;
+              }
+              break;
+
+            case 'pseudonymization':
+              const hash = require('crypto').createHash('sha256');
+              updateData.ipAddress = hash.update(event.ipAddress + 'salt').digest('hex').substring(0, 8);
+              updateData.userAgent = 'Pseudonymized';
+              updateData.customerId = `pseudo_${hash.update(event.customerId + 'salt').digest('hex').substring(0, 8)}`;
+              result.preservedFields.push('initialSpendAmount', 'productId');
+              break;
+          }
+
+          await ConversionEvent.findByIdAndUpdate(event._id, updateData);
+          result.recordsProcessed++;
+        } catch (error) {
+          result.errors.push(`Failed to anonymize conversion event ${event._id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Advanced user profile anonymization
+   */
+  private static async advancedUserProfileAnonymization(
+    strategy: 'full' | 'partial' | 'pseudonymization',
+    criteria: any,
+    batchSize: number
+  ): Promise<{
+    recordsProcessed: number;
+    preservedFields: string[];
+    errors: string[];
+  }> {
+    const result = {
+      recordsProcessed: 0,
+      preservedFields: [] as string[],
+      errors: [] as string[]
+    };
+
+    const profiles = await UserProfile.find(criteria).limit(batchSize * 10);
+    
+    for (let i = 0; i < profiles.length; i += batchSize) {
+      const batch = profiles.slice(i, i + batchSize);
+      
+      for (const profile of batch) {
+        try {
+          const updateData: any = {};
+          const unsetData: any = {};
+
+          switch (strategy) {
+            case 'full':
+              updateData.firstName = 'Anonymized User';
+              updateData.lastName = '';
+              updateData.phone = '';
+              updateData.dateOfBirth = null;
+              updateData.address = null;
+              unsetData.kycDocuments = 1;
+              unsetData.taxId = 1;
+              unsetData.bankAccountInfo = 1;
+              break;
+
+            case 'partial':
+              updateData.firstName = 'Anonymized User';
+              updateData.lastName = '';
+              updateData.phone = '';
+              result.preservedFields.push('kycStatus', 'complianceQuizPassed');
+              unsetData.kycDocuments = 1;
+              unsetData.taxId = 1;
+              break;
+
+            case 'pseudonymization':
+              const hash = require('crypto').createHash('sha256');
+              updateData.firstName = `User_${hash.update(profile.firstName + 'salt').digest('hex').substring(0, 6)}`;
+              updateData.lastName = `${hash.update(profile.lastName + 'salt').digest('hex').substring(0, 6)}`;
+              updateData.phone = '';
+              result.preservedFields.push('kycStatus', 'complianceQuizPassed', 'dateOfBirth');
+              unsetData.kycDocuments = 1;
+              break;
+          }
+
+          const updateQuery: any = { $set: updateData };
+          if (Object.keys(unsetData).length > 0) {
+            updateQuery.$unset = unsetData;
+          }
+
+          await UserProfile.findByIdAndUpdate(profile._id, updateQuery);
+          result.recordsProcessed++;
+        } catch (error) {
+          result.errors.push(`Failed to anonymize user profile ${profile._id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Bulk anonymization with progress tracking
+   */
+  static async bulkAnonymization(
+    dataType: string,
+    criteria: any,
+    batchSize: number = 100
+  ): Promise<{
+    success: boolean;
+    totalProcessed: number;
+    totalAnonymized: number;
+    errors: string[];
+    progress: Array<{ batch: number; processed: number; anonymized: number }>;
+  }> {
+    const result = {
+      success: true,
+      totalProcessed: 0,
+      totalAnonymized: 0,
+      errors: [] as string[],
+      progress: [] as Array<{ batch: number; processed: number; anonymized: number }>
+    };
+
+    try {
+      logger.info(`Starting bulk anonymization for ${dataType}`, {
+        criteria,
+        batchSize
+      });
+
+      let Model: any;
+      let anonymizationFields: any;
+
+      switch (dataType) {
+        case 'click_events':
+          Model = ClickEvent;
+          anonymizationFields = {
+            ipAddress: '0.0.0.0',
+            userAgent: 'Anonymized',
+            fingerprint: 'anonymized'
+          };
+          break;
+        case 'conversion_events':
+          Model = ConversionEvent;
+          anonymizationFields = {
+            ipAddress: '0.0.0.0',
+            userAgent: 'Anonymized'
+          };
+          break;
+        default:
+          result.success = false;
+          result.errors.push(`Unsupported data type for bulk anonymization: ${dataType}`);
+          return result;
+      }
+
+      const totalRecords = await Model.countDocuments(criteria);
+      const totalBatches = Math.ceil(totalRecords / batchSize);
+
+      for (let batchNum = 0; batchNum < totalBatches; batchNum++) {
+        try {
+          const skip = batchNum * batchSize;
+          const batchRecords = await Model.find(criteria).skip(skip).limit(batchSize);
+          
+          let batchAnonymized = 0;
+          
+          for (const record of batchRecords) {
+            try {
+              // Check if already anonymized
+              const isAlreadyAnonymized = dataType === 'click_events' 
+                ? record.ipAddress === '0.0.0.0'
+                : record.ipAddress === '0.0.0.0';
+
+              if (!isAlreadyAnonymized) {
+                await Model.findByIdAndUpdate(record._id, anonymizationFields);
+                batchAnonymized++;
+              }
+            } catch (error) {
+              result.errors.push(`Failed to anonymize record ${record._id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            }
+          }
+
+          result.progress.push({
+            batch: batchNum + 1,
+            processed: batchRecords.length,
+            anonymized: batchAnonymized
+          });
+
+          result.totalProcessed += batchRecords.length;
+          result.totalAnonymized += batchAnonymized;
+
+          // Log progress every 10 batches
+          if ((batchNum + 1) % 10 === 0) {
+            logger.info(`Bulk anonymization progress: ${batchNum + 1}/${totalBatches} batches completed`);
+          }
+        } catch (error) {
+          result.errors.push(`Failed to process batch ${batchNum + 1}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      }
+
+      // Log completion
+      await this.logDataProcessingActivity(
+        'system',
+        'data_anonymization',
+        `Bulk anonymization completed for ${dataType}`,
+        {
+          dataType,
+          totalProcessed: result.totalProcessed,
+          totalAnonymized: result.totalAnonymized,
+          batchCount: result.progress.length,
+          errorCount: result.errors.length
+        }
+      );
+
+      if (result.errors.length > 0) {
+        result.success = false;
+      }
+
+      return result;
+    } catch (error) {
+      logger.error(`Bulk anonymization failed for ${dataType}`, {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      result.success = false;
+      result.errors.push(error instanceof Error ? error.message : 'Unknown error');
+      return result;
+    }
+  }
+
+  /**
+   * Manually trigger anonymization for specific data types
+   */
+  static async manualAnonymization(
+    dataType: string,
+    olderThanDays: number,
+    dryRun: boolean = true
+  ): Promise<DataAnonymizationResult> {
+    try {
+      logger.info(`Manual anonymization requested for ${dataType}, older than ${olderThanDays} days, dryRun: ${dryRun}`);
+      
+      const cutoffDate = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+      const result: DataAnonymizationResult = {
+        success: true,
+        recordsProcessed: 0,
+        errors: []
+      };
+
+      // Create a temporary policy for this operation
+      const tempPolicy: DataRetentionPolicy = {
+        name: 'manual_anonymization',
+        description: `Manual anonymization of ${dataType}`,
+        retentionPeriodDays: olderThanDays,
+        dataTypes: [dataType],
+        anonymizeAfterDays: olderThanDays,
+        isActive: true
+      };
+
+      if (!dryRun) {
+        const processResult = await this.processDataType(dataType, tempPolicy);
+        result.recordsProcessed = processResult.recordsAnonymized;
+        
+        await this.logDataProcessingActivity(
+          'system',
+          'manual_anonymization',
+          `Manual anonymization completed for ${dataType}`,
+          { 
+            dataType, 
+            olderThanDays, 
+            recordsProcessed: result.recordsProcessed 
+          }
+        );
+      } else {
+        // Dry run - just count records that would be processed
+        switch (dataType) {
+          case 'click_events':
+            result.recordsProcessed = await ClickEvent.countDocuments({
+              timestamp: { $lt: cutoffDate },
+              ipAddress: { $ne: '0.0.0.0' }
+            });
+            break;
+          case 'conversion_events':
+            result.recordsProcessed = await ConversionEvent.countDocuments({
+              conversionTimestamp: { $lt: cutoffDate },
+              ipAddress: { $ne: '0.0.0.0' }
+            });
+            break;
+          case 'user_profiles':
+            result.recordsProcessed = await UserProfile.countDocuments({
+              updatedAt: { $lt: cutoffDate },
+              firstName: { $ne: 'Anonymized User' }
+            });
+            break;
+          default:
+            result.errors.push(`Unsupported data type for manual anonymization: ${dataType}`);
+            result.success = false;
+        }
+      }
+
+      logger.info(`Manual anonymization ${dryRun ? 'dry run' : 'execution'} completed`, result);
+      return result;
+    } catch (error) {
+      logger.error('Manual anonymization failed:', error);
+      return {
+        success: false,
+        recordsProcessed: 0,
+        errors: [error instanceof Error ? error.message : 'Unknown error']
+      };
+    }
+  }
+
+  /**
+   * Enhanced automated data retention policy enforcement
+   * Ensures all policies are properly configured and executed on schedule
+   */
+  static async enforceAutomatedRetention(): Promise<{
+    success: boolean;
+    policiesExecuted: number;
+    totalRecordsProcessed: number;
+    errors: string[];
+    nextScheduledExecution?: Date;
+  }> {
+    try {
+      logger.info('Starting automated data retention enforcement');
+      
+      // Execute all active retention policies
+      const reports = await this.executeRetentionPolicies();
+      
+      const result = {
+        success: reports.every(r => r.errors.length === 0),
+        policiesExecuted: reports.length,
+        totalRecordsProcessed: reports.reduce((sum, r) => sum + r.recordsProcessed, 0),
+        errors: reports.flatMap(r => r.errors),
+        nextScheduledExecution: new Date(Date.now() + 24 * 60 * 60 * 1000) // Next day
+      };
+      
+      // Log enforcement results
+      await this.logDataProcessingActivity(
+        'system',
+        'retention_policy_started',
+        'Automated data retention enforcement completed',
+        {
+          success: result.success,
+          policiesExecuted: result.policiesExecuted,
+          totalRecordsProcessed: result.totalRecordsProcessed,
+          errorCount: result.errors.length
+        }
+      );
+      
+      logger.info('Automated data retention enforcement completed', {
+        success: result.success,
+        policiesExecuted: result.policiesExecuted,
+        totalRecordsProcessed: result.totalRecordsProcessed,
+        errorCount: result.errors.length
+      });
+      
+      return result;
+    } catch (error) {
+      logger.error('Automated data retention enforcement failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Advanced data anonymization system with configurable strategies
+   */
+  static async advancedAnonymization(
+    dataType: string,
+    anonymizationStrategy: 'full' | 'partial' | 'pseudonymization',
+    criteria: any,
+    options: {
+      batchSize?: number;
+      preserveAnalytics?: boolean;
+      auditTrail?: boolean;
+    } = {}
+  ): Promise<{
+    success: boolean;
+    recordsProcessed: number;
+    anonymizationMethod: string;
+    preservedFields: string[];
+    errors: string[];
+  }> {
+    const result = {
+      success: true,
+      recordsProcessed: 0,
+      anonymizationMethod: anonymizationStrategy,
+      preservedFields: [] as string[],
+      errors: [] as string[]
+    };
+
+    try {
+      logger.info(`Starting advanced anonymization for ${dataType}`, {
+        strategy: anonymizationStrategy,
+        criteria,
+        options
+      });
+
+      const batchSize = options.batchSize || 100;
+      let processedCount = 0;
+
+      switch (dataType) {
+        case 'click_events':
+          const clickEvents = await ClickEvent.find(criteria);
+          
+          for (const event of clickEvents) {
+            try {
+              const updateFields: any = {};
+              
+              switch (anonymizationStrategy) {
+                case 'full':
+                  updateFields.ipAddress = '0.0.0.0';
+                  updateFields.userAgent = 'Anonymized';
+                  updateFields.fingerprint = 'anonymized';
+                  updateFields.sessionId = 'anonymized';
+                  break;
+                  
+                case 'partial':
+                  updateFields.ipAddress = '0.0.0.0';
+                  updateFields.userAgent = 'Anonymized';
+                  // Preserve fingerprint and sessionId for analytics
+                  if (options.preserveAnalytics) {
+                    result.preservedFields.push('fingerprint', 'sessionId');
+                  } else {
+                    updateFields.fingerprint = 'anonymized';
+                  }
+                  break;
+                  
+                case 'pseudonymization':
+                  updateFields.ipAddress = this.generatePseudonym(event.ipAddress);
+                  updateFields.userAgent = 'Pseudonymized';
+                  updateFields.fingerprint = this.generatePseudonym(event.fingerprint);
+                  break;
+              }
+              
+              await ClickEvent.findByIdAndUpdate(event._id, { $set: updateFields });
+              processedCount++;
+              
+              if (options.auditTrail) {
+                await this.logDataProcessingActivity(
+                  'system',
+                  'data_anonymization',
+                  `Advanced anonymization applied to click event ${event._id}`,
+                  {
+                    strategy: anonymizationStrategy,
+                    fieldsUpdated: Object.keys(updateFields),
+                    preservedFields: result.preservedFields
+                  }
+                );
+              }
+            } catch (error) {
+              const errorMsg = `Failed to anonymize click event ${event._id}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+              result.errors.push(errorMsg);
+              logger.error(errorMsg, { error, eventId: event._id });
+            }
+          }
+          break;
+
+        case 'conversion_events':
+          const conversionEvents = await ConversionEvent.find(criteria);
+          
+          for (const event of conversionEvents) {
+            try {
+              const updateFields: any = {};
+              
+              switch (anonymizationStrategy) {
+                case 'full':
+                  updateFields.ipAddress = '0.0.0.0';
+                  updateFields.userAgent = 'Anonymized';
+                  updateFields.fingerprint = 'anonymized';
+                  updateFields.customerId = `anon_${event._id.toString().slice(-8)}`;
+                  break;
+                  
+                case 'partial':
+                  updateFields.ipAddress = '0.0.0.0';
+                  updateFields.userAgent = 'Anonymized';
+                  // Preserve customer ID for financial tracking if needed
+                  if (!options.preserveAnalytics) {
+                    updateFields.customerId = `anon_${event._id.toString().slice(-8)}`;
+                  } else {
+                    result.preservedFields.push('customerId');
+                  }
+                  break;
+                  
+                case 'pseudonymization':
+                  updateFields.ipAddress = this.generatePseudonym(event.ipAddress);
+                  updateFields.userAgent = 'Pseudonymized';
+                  updateFields.customerId = this.generatePseudonym(event.customerId);
+                  break;
+              }
+              
+              await ConversionEvent.findByIdAndUpdate(event._id, { $set: updateFields });
+              processedCount++;
+              
+              if (options.auditTrail) {
+                await this.logDataProcessingActivity(
+                  'system',
+                  'data_anonymization',
+                  `Advanced anonymization applied to conversion event ${event._id}`,
+                  {
+                    strategy: anonymizationStrategy,
+                    fieldsUpdated: Object.keys(updateFields)
+                  }
+                );
+              }
+            } catch (error) {
+              const errorMsg = `Failed to anonymize conversion event ${event._id}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+              result.errors.push(errorMsg);
+              logger.error(errorMsg, { error, eventId: event._id });
+            }
+          }
+          break;
+
+        default:
+          throw new Error(`Unsupported data type for advanced anonymization: ${dataType}`);
+      }
+
+      result.recordsProcessed = processedCount;
+      result.success = result.errors.length === 0;
+
+      // Log completion
+      await this.logDataProcessingActivity(
+        'system',
+        'data_anonymization',
+        `Advanced anonymization completed for ${dataType}`,
+        {
+          strategy: anonymizationStrategy,
+          recordsProcessed: result.recordsProcessed,
+          preservedFields: result.preservedFields,
+          errorCount: result.errors.length
+        }
+      );
+
+      logger.info(`Advanced anonymization completed for ${dataType}`, {
+        strategy: anonymizationStrategy,
+        recordsProcessed: result.recordsProcessed,
+        errorCount: result.errors.length
+      });
+
+      return result;
+    } catch (error) {
+      const errorMsg = `Advanced anonymization failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      result.errors.push(errorMsg);
+      result.success = false;
+      logger.error(errorMsg, { error, dataType, strategy: anonymizationStrategy });
+      return result;
+    }
+  }
+
+  /**
+   * Generate pseudonym for data pseudonymization
+   */
+  private static generatePseudonym(originalValue: string): string {
+    const crypto = require('crypto');
+    return crypto.createHash('sha256').update(originalValue + 'salt_key').digest('hex').substring(0, 16);
+  };
+        }
+      }
+
+      logger.info(`Manual anonymization ${dryRun ? 'dry run' : 'execution'} completed`, result);
+      return result;
+    } catch (error) {
+      logger.error('Manual anonymization failed:', error);
+      return {
+        success: false,
+        recordsProcessed: 0,
+        errors: [error instanceof Error ? error.message : 'Unknown error']
+      };
+    }
+  }
+
+  /**
+   * Log data processing activities for audit trail
+   */
+  private static async logDataProcessingActivity(
+    userId: string,
+    action: string,
+    details: string,
+    metadata?: any
+  ): Promise<void> {
+    try {
+      const auditLog = new AuditLog({
+        adminId: userId,
+        action,
+        resource: 'system',
+        details: {
+          reason: details,
+          metadata
+        },
+        ipAddress: '127.0.0.1', // System action
+        userAgent: 'Data Retention Service',
+        timestamp: new Date()
+      });
+
+      await auditLog.save();
+    } catch (error) {
+      logger.error('Error logging data processing activity:', error);
+      // Don't throw error here to avoid breaking the main operation
+    }
+  }
+
+  /**
+   * Validate retention policy configuration
+   */
+  static validateRetentionPolicy(policy: DataRetentionPolicy): { isValid: boolean; errors: string[] } {
+    const errors: string[] = [];
+    
+    if (!policy.name || policy.name.trim().length === 0) {
+      errors.push('Policy name is required');
+    }
+    
+    if (!policy.description || policy.description.trim().length === 0) {
+      errors.push('Policy description is required');
+    }
+    
+    if (!policy.retentionPeriodDays || policy.retentionPeriodDays <= 0) {
+      errors.push('Retention period must be a positive number');
+    }
+    
+    if (!policy.dataTypes || policy.dataTypes.length === 0) {
+      errors.push('At least one data type must be specified');
+    }
+    
+    if (policy.anonymizeAfterDays && policy.anonymizeAfterDays <= 0) {
+      errors.push('Anonymization period must be a positive number');
+    }
+    
+    if (policy.deleteAfterDays && policy.deleteAfterDays <= 0) {
+      errors.push('Deletion period must be a positive number');
+    }
+    
+    if (policy.anonymizeAfterDays && policy.deleteAfterDays && 
+        policy.anonymizeAfterDays >= policy.deleteAfterDays) {
+      errors.push('Anonymization period must be less than deletion period');
+    }
+    
+    return {
+      isValid: errors.length === 0,
+      errors
+    };
+  }
+
+  /**
+   * Create or update custom retention policy
+   */
+  static async createRetentionPolicy(policy: DataRetentionPolicy): Promise<{ success: boolean; errors: string[] }> {
+    try {
+      const validation = this.validateRetentionPolicy(policy);
+      if (!validation.isValid) {
+        return { success: false, errors: validation.errors };
+      }
+
+      // Log policy creation
+      await this.logDataProcessingActivity(
+        'system',
+        'retention_policy_created',
+        `Created new retention policy: ${policy.name}`,
+        { policy }
+      );
+
+      logger.info(`Created retention policy: ${policy.name}`, { policy });
+      return { success: true, errors: [] };
+    } catch (error) {
+      const errorMsg = `Failed to create retention policy: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      logger.error(errorMsg, { error, policy });
+      return { success: false, errors: [errorMsg] };
+    }
+  }
+
+  /**
+   * Enhanced data anonymization with field-level control
+   */
+  static async anonymizeDataFields(
+    collection: string,
+    documentId: string,
+    fieldsToAnonymize: string[],
+    reason: string
+  ): Promise<{ success: boolean; errors: string[] }> {
+    try {
+      logger.info(`Starting field-level anonymization for ${collection}:${documentId}`, {
+        collection,
+        documentId,
+        fields: fieldsToAnonymize,
+        reason
+      });
+
+      let updateResult;
+      const anonymizationMap: any = {};
+
+      // Build anonymization update object
+      fieldsToAnonymize.forEach(field => {
+        switch (field) {
+          case 'ipAddress':
+            anonymizationMap[field] = '0.0.0.0';
+            break;
+          case 'userAgent':
+            anonymizationMap[field] = 'Anonymized';
+            break;
+          case 'email':
+            anonymizationMap[field] = `anonymized_${Date.now()}_${documentId.slice(-4)}@deleted.local`;
+            break;
+          case 'firstName':
+            anonymizationMap[field] = 'Anonymized User';
+            break;
+          case 'lastName':
+          case 'phone':
+          case 'address':
+            anonymizationMap[field] = '';
+            break;
+          case 'fingerprint':
+            anonymizationMap[field] = 'anonymized';
+            break;
+          default:
+            anonymizationMap[field] = 'anonymized';
+        }
+      });
+
+      // Apply anonymization based on collection type
+      switch (collection) {
+        case 'users':
+          updateResult = await User.findByIdAndUpdate(documentId, { $set: anonymizationMap });
+          break;
+        case 'clickevents':
+          updateResult = await ClickEvent.findByIdAndUpdate(documentId, { $set: anonymizationMap });
+          break;
+        case 'conversionevents':
+          updateResult = await ConversionEvent.findByIdAndUpdate(documentId, { $set: anonymizationMap });
+          break;
+        case 'auditlogs':
+          updateResult = await AuditLog.findByIdAndUpdate(documentId, { $set: anonymizationMap });
+          break;
+        default:
+          throw new Error(`Unsupported collection for field-level anonymization: ${collection}`);
+      }
+
+      if (!updateResult) {
+        throw new Error(`Document not found: ${collection}:${documentId}`);
+      }
+
+      // Log the anonymization activity
+      await this.logDataProcessingActivity(
+        'system',
+        'field_rectification',
+        `Field-level anonymization completed for ${collection}:${documentId}`,
+        {
+          collection,
+          documentId,
+          fieldsAnonymized: fieldsToAnonymize,
+          reason,
+          anonymizationMap
+        }
+      );
+
+      logger.info(`Field-level anonymization completed for ${collection}:${documentId}`, {
+        fieldsAnonymized: fieldsToAnonymize.length
+      });
+
+      return { success: true, errors: [] };
+    } catch (error) {
+      const errorMsg = `Field-level anonymization failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      logger.error(errorMsg, { error, collection, documentId, fieldsToAnonymize });
+      return { success: false, errors: [errorMsg] };
+    }
+  }
+
+  /**
+   * Bulk anonymization with progress tracking
+   */
+  static async bulkAnonymization(
+    dataType: string,
+    criteria: any,
+    batchSize: number = 100
+  ): Promise<{
+    success: boolean;
+    totalProcessed: number;
+    totalAnonymized: number;
+    errors: string[];
+    progress: Array<{ batch: number; processed: number; anonymized: number }>;
+  }> {
+    const result = {
+      success: true,
+      totalProcessed: 0,
+      totalAnonymized: 0,
+      errors: [] as string[],
+      progress: [] as Array<{ batch: number; processed: number; anonymized: number }>
+    };
+
+    try {
+      logger.info(`Starting bulk anonymization for ${dataType}`, { criteria, batchSize });
+
+      let batchNumber = 0;
+      let hasMore = true;
+
+      while (hasMore) {
+        batchNumber++;
+        let batchProcessed = 0;
+        let batchAnonymized = 0;
+
+        try {
+          // Process batch based on data type
+          switch (dataType) {
+            case 'click_events':
+              const clickEvents = await ClickEvent.find(criteria).limit(batchSize);
+              if (clickEvents.length === 0) {
+                hasMore = false;
+                break;
+              }
+
+              for (const event of clickEvents) {
+                if (event.ipAddress !== '0.0.0.0') {
+                  await ClickEvent.findByIdAndUpdate(event._id, {
+                    $set: {
+                      ipAddress: '0.0.0.0',
+                      userAgent: 'Anonymized',
+                      fingerprint: 'anonymized'
+                    }
+                  });
+                  batchAnonymized++;
+                }
+                batchProcessed++;
+              }
+
+              // Update criteria to skip processed records
+              criteria._id = { $gt: clickEvents[clickEvents.length - 1]._id };
+              break;
+
+            case 'conversion_events':
+              const conversionEvents = await ConversionEvent.find(criteria).limit(batchSize);
+              if (conversionEvents.length === 0) {
+                hasMore = false;
+                break;
+              }
+
+              for (const event of conversionEvents) {
+                if (event.ipAddress !== '0.0.0.0') {
+                  await ConversionEvent.findByIdAndUpdate(event._id, {
+                    $set: {
+                      ipAddress: '0.0.0.0',
+                      userAgent: 'Anonymized',
+                      fingerprint: 'anonymized'
+                    }
+                  });
+                  batchAnonymized++;
+                }
+                batchProcessed++;
+              }
+
+              criteria._id = { $gt: conversionEvents[conversionEvents.length - 1]._id };
+              break;
+
+            default:
+              throw new Error(`Unsupported data type for bulk anonymization: ${dataType}`);
+          }
+
+          result.totalProcessed += batchProcessed;
+          result.totalAnonymized += batchAnonymized;
+          result.progress.push({ batch: batchNumber, processed: batchProcessed, anonymized: batchAnonymized });
+
+          logger.info(`Bulk anonymization batch ${batchNumber} completed`, {
+            dataType,
+            batchProcessed,
+            batchAnonymized,
+            totalProcessed: result.totalProcessed
+          });
+
+          // Small delay to prevent overwhelming the database
+          await new Promise(resolve => setTimeout(resolve, 10));
+
+        } catch (batchError) {
+          const errorMsg = `Batch ${batchNumber} failed: ${batchError instanceof Error ? batchError.message : 'Unknown error'}`;
+          result.errors.push(errorMsg);
+          logger.error(errorMsg, { batchError, batchNumber, dataType });
+          
+          // Continue with next batch on error
+          continue;
+        }
+      }
+
+      // Log bulk anonymization completion
+      await this.logDataProcessingActivity(
+        'system',
+        'data_anonymization',
+        `Bulk anonymization completed for ${dataType}`,
+        {
+          dataType,
+          totalProcessed: result.totalProcessed,
+          totalAnonymized: result.totalAnonymized,
+          batchCount: batchNumber,
+          errors: result.errors.length
+        }
+      );
+
+      logger.info(`Bulk anonymization completed for ${dataType}`, {
+        totalProcessed: result.totalProcessed,
+        totalAnonymized: result.totalAnonymized,
+        batchCount: batchNumber,
+        errorCount: result.errors.length
+      });
+
+    } catch (error) {
+      const errorMsg = `Bulk anonymization failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      result.errors.push(errorMsg);
+      result.success = false;
+      logger.error(errorMsg, { error, dataType, criteria });
+    }
+
+    return result;
+  }
+
+  /**
+   * Enhanced automated data retention policy enforcement
+   * Ensures all policies are properly configured and executed on schedule
+   */
+  static async enforceAutomatedRetention(): Promise<{
+    success: boolean;
+    policiesExecuted: number;
+    totalRecordsProcessed: number;
+    errors: string[];
+    nextScheduledExecution?: Date;
+  }> {
+    try {
+      logger.info('Starting automated data retention enforcement');
+      
+      // Execute all active retention policies
+      const reports = await this.executeRetentionPolicies();
+      
+      const result = {
+        success: reports.every(r => r.errors.length === 0),
+        policiesExecuted: reports.length,
+        totalRecordsProcessed: reports.reduce((sum, r) => sum + r.recordsProcessed, 0),
+        errors: reports.flatMap(r => r.errors),
+        nextScheduledExecution: new Date(Date.now() + 24 * 60 * 60 * 1000) // Next day
+      };
+      
+      // Log enforcement results
+      await this.logDataProcessingActivity(
+        'system',
+        'retention_policy_started',
+        'Automated data retention enforcement completed',
+        {
+          success: result.success,
+          policiesExecuted: result.policiesExecuted,
+          totalRecordsProcessed: result.totalRecordsProcessed,
+          errorCount: result.errors.length
+        }
+      );
+      
+      logger.info('Automated data retention enforcement completed', {
+        success: result.success,
+        policiesExecuted: result.policiesExecuted,
+        totalRecordsProcessed: result.totalRecordsProcessed,
+        errorCount: result.errors.length
+      });
+      
+      return result;
+    } catch (error) {
+      logger.error('Automated data retention enforcement failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Advanced data anonymization system with configurable strategies
+   */
+  static async advancedAnonymization(
+    dataType: string,
+    anonymizationStrategy: 'full' | 'partial' | 'pseudonymization',
+    criteria: any,
+    options: {
+      batchSize?: number;
+      preserveAnalytics?: boolean;
+      auditTrail?: boolean;
+    } = {}
+  ): Promise<{
+    success: boolean;
+    recordsProcessed: number;
+    anonymizationMethod: string;
+    preservedFields: string[];
+    errors: string[];
+  }> {
+    const result = {
+      success: true,
+      recordsProcessed: 0,
+      anonymizationMethod: anonymizationStrategy,
+      preservedFields: [] as string[],
+      errors: [] as string[]
+    };
+
+    try {
+      logger.info(`Starting advanced anonymization for ${dataType}`, {
+        strategy: anonymizationStrategy,
+        criteria,
+        options
+      });
+
+      const batchSize = options.batchSize || 100;
+      let processedCount = 0;
+
+      switch (dataType) {
+        case 'click_events':
+          const clickEvents = await ClickEvent.find(criteria);
+          
+          for (const event of clickEvents) {
+            try {
+              const updateFields: any = {};
+              
+              switch (anonymizationStrategy) {
+                case 'full':
+                  updateFields.ipAddress = '0.0.0.0';
+                  updateFields.userAgent = 'Anonymized';
+                  updateFields.fingerprint = 'anonymized';
+                  updateFields.sessionId = 'anonymized';
+                  break;
+                  
+                case 'partial':
+                  updateFields.ipAddress = '0.0.0.0';
+                  updateFields.userAgent = 'Anonymized';
+                  // Preserve fingerprint and sessionId for analytics
+                  if (options.preserveAnalytics) {
+                    result.preservedFields.push('fingerprint', 'sessionId');
+                  } else {
+                    updateFields.fingerprint = 'anonymized';
+                  }
+                  break;
+                  
+                case 'pseudonymization':
+                  updateFields.ipAddress = this.generatePseudonym(event.ipAddress);
+                  updateFields.userAgent = 'Pseudonymized';
+                  updateFields.fingerprint = this.generatePseudonym(event.fingerprint);
+                  break;
+              }
+              
+              await ClickEvent.findByIdAndUpdate(event._id, { $set: updateFields });
+              processedCount++;
+              
+              if (options.auditTrail) {
+                await this.logDataProcessingActivity(
+                  'system',
+                  'data_anonymization',
+                  `Advanced anonymization applied to click event ${event._id}`,
+                  {
+                    strategy: anonymizationStrategy,
+                    fieldsUpdated: Object.keys(updateFields),
+                    preservedFields: result.preservedFields
+                  }
+                );
+              }
+            } catch (error) {
+              const errorMsg = `Failed to anonymize click event ${event._id}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+              result.errors.push(errorMsg);
+              logger.error(errorMsg, { error, eventId: event._id });
+            }
+          }
+          break;
+
+        case 'conversion_events':
+          const conversionEvents = await ConversionEvent.find(criteria);
+          
+          for (const event of conversionEvents) {
+            try {
+              const updateFields: any = {};
+              
+              switch (anonymizationStrategy) {
+                case 'full':
+                  updateFields.ipAddress = '0.0.0.0';
+                  updateFields.userAgent = 'Anonymized';
+                  updateFields.fingerprint = 'anonymized';
+                  updateFields.customerId = `anon_${event._id.toString().slice(-8)}`;
+                  break;
+                  
+                case 'partial':
+                  updateFields.ipAddress = '0.0.0.0';
+                  updateFields.userAgent = 'Anonymized';
+                  // Preserve customer ID for financial tracking if needed
+                  if (!options.preserveAnalytics) {
+                    updateFields.customerId = `anon_${event._id.toString().slice(-8)}`;
+                  } else {
+                    result.preservedFields.push('customerId');
+                  }
+                  break;
+                  
+                case 'pseudonymization':
+                  updateFields.ipAddress = this.generatePseudonym(event.ipAddress);
+                  updateFields.userAgent = 'Pseudonymized';
+                  updateFields.customerId = this.generatePseudonym(event.customerId);
+                  break;
+              }
+              
+              await ConversionEvent.findByIdAndUpdate(event._id, { $set: updateFields });
+              processedCount++;
+              
+              if (options.auditTrail) {
+                await this.logDataProcessingActivity(
+                  'system',
+                  'data_anonymization',
+                  `Advanced anonymization applied to conversion event ${event._id}`,
+                  {
+                    strategy: anonymizationStrategy,
+                    fieldsUpdated: Object.keys(updateFields)
+                  }
+                );
+              }
+            } catch (error) {
+              const errorMsg = `Failed to anonymize conversion event ${event._id}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+              result.errors.push(errorMsg);
+              logger.error(errorMsg, { error, eventId: event._id });
+            }
+          }
+          break;
+
+        default:
+          throw new Error(`Unsupported data type for advanced anonymization: ${dataType}`);
+      }
+
+      result.recordsProcessed = processedCount;
+      result.success = result.errors.length === 0;
+
+      // Log completion
+      await this.logDataProcessingActivity(
+        'system',
+        'data_anonymization',
+        `Advanced anonymization completed for ${dataType}`,
+        {
+          strategy: anonymizationStrategy,
+          recordsProcessed: result.recordsProcessed,
+          preservedFields: result.preservedFields,
+          errorCount: result.errors.length
+        }
+      );
+
+      logger.info(`Advanced anonymization completed for ${dataType}`, {
+        strategy: anonymizationStrategy,
+        recordsProcessed: result.recordsProcessed,
+        errorCount: result.errors.length
+      });
+
+      return result;
+    } catch (error) {
+      const errorMsg = `Advanced anonymization failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      result.errors.push(errorMsg);
+      result.success = false;
+      logger.error(errorMsg, { error, dataType, strategy: anonymizationStrategy });
+      return result;
+    }
+  }
+
+  /**
+   * Generate pseudonym for data pseudonymization
+   */
+  private static generatePseudonym(originalValue: string): string {
+    const crypto = require('crypto');
+    return crypto.createHash('sha256').update(originalValue + 'salt_key').digest('hex').substring(0, 16);
+  }
+
+  /**
+   * Data retention compliance check
+   */
+  static async performComplianceCheck(): Promise<{
+    compliant: boolean;
+    issues: Array<{
+      severity: 'high' | 'medium' | 'low';
+      category: string;
+      description: string;
+      affectedRecords: number;
+      recommendation: string;
+    }>;
+    summary: {
+      totalIssues: number;
+      highSeverityIssues: number;
+      recordsRequiringAttention: number;
+    };
+  }> {
+    const issues: Array<{
+      severity: 'high' | 'medium' | 'low';
+      category: string;
+      description: string;
+      affectedRecords: number;
+      recommendation: string;
+    }> = [];
+
+    try {
+      logger.info('Starting data retention compliance check');
+
+      const now = new Date();
+      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      const oneYearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+      const threeYearsAgo = new Date(now.getTime() - 3 * 365 * 24 * 60 * 60 * 1000);
+
+      // Check for overdue anonymization - Click Events
+      const overdueClickEvents = await ClickEvent.countDocuments({
+        timestamp: { $lt: ninetyDaysAgo },
+        ipAddress: { $ne: '0.0.0.0' }
+      });
+
+      if (overdueClickEvents > 0) {
+        issues.push({
+          severity: 'high',
+          category: 'Data Anonymization',
+          description: 'Click events older than 90 days not anonymized',
+          affectedRecords: overdueClickEvents,
+          recommendation: 'Run anonymization process for click events older than 90 days'
+        });
+      }
+
+      // Check for overdue anonymization - Conversion Events
+      const overdueConversionEvents = await ConversionEvent.countDocuments({
+        conversionTimestamp: { $lt: ninetyDaysAgo },
+        ipAddress: { $ne: '0.0.0.0' }
+      });
+
+      if (overdueConversionEvents > 0) {
+        issues.push({
+          severity: 'high',
+          category: 'Data Anonymization',
+          description: 'Conversion events older than 90 days not anonymized',
+          affectedRecords: overdueConversionEvents,
+          recommendation: 'Run anonymization process for conversion events older than 90 days'
+        });
+      }
+
+      // Check for inactive users not anonymized
+      const inactiveUsers = await User.countDocuments({
+        $or: [
+          { lastLogin: { $lt: threeYearsAgo } },
+          { lastLogin: { $exists: false }, createdAt: { $lt: threeYearsAgo } }
+        ],
+        status: { $ne: 'revoked' },
+        firstName: { $ne: 'Anonymized User' }
+      });
+
+      if (inactiveUsers > 0) {
+        issues.push({
+          severity: 'medium',
+          category: 'User Data Retention',
+          description: 'Inactive users older than 3 years not anonymized',
+          affectedRecords: inactiveUsers,
+          recommendation: 'Review and anonymize inactive user accounts older than 3 years'
+        });
+      }
+
+      // Check for old audit logs
+      const oldAuditLogs = await AuditLog.countDocuments({
+        timestamp: { $lt: oneYearAgo },
+        ipAddress: { $ne: '0.0.0.0' }
+      });
+
+      if (oldAuditLogs > 1000) {
+        issues.push({
+          severity: 'low',
+          category: 'Audit Log Retention',
+          description: 'Large number of old audit logs not anonymized',
+          affectedRecords: oldAuditLogs,
+          recommendation: 'Consider anonymizing audit logs older than 1 year'
+        });
+      }
+
+      // Check for very old data that should be deleted
+      const veryOldClickEvents = await ClickEvent.countDocuments({
+        timestamp: { $lt: oneYearAgo }
+      });
+
+      if (veryOldClickEvents > 10000) {
+        issues.push({
+          severity: 'medium',
+          category: 'Data Deletion',
+          description: 'Large volume of click events older than 1 year',
+          affectedRecords: veryOldClickEvents,
+          recommendation: 'Consider implementing deletion policy for very old click events'
+        });
+      }
+
+      const summary = {
+        totalIssues: issues.length,
+        highSeverityIssues: issues.filter(i => i.severity === 'high').length,
+        recordsRequiringAttention: issues.reduce((sum, issue) => sum + issue.affectedRecords, 0)
+      };
+
+      const compliant = summary.highSeverityIssues === 0;
+
+      // Log compliance check results
+      await this.logDataProcessingActivity(
+        'system',
+        'data_retention_check',
+        'Data retention compliance check completed',
+        {
+          compliant,
+          totalIssues: summary.totalIssues,
+          highSeverityIssues: summary.highSeverityIssues,
+          recordsRequiringAttention: summary.recordsRequiringAttention,
+          issues: issues.map(i => ({
+            severity: i.severity,
+            category: i.category,
+            affectedRecords: i.affectedRecords
+          }))
+        }
+      );
+
+      logger.info('Data retention compliance check completed', {
+        compliant,
+        summary,
+        issueCount: issues.length
+      });
+
+      return { compliant, issues, summary };
+
+    } catch (error) {
+      logger.error('Data retention compliance check failed', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Validate retention policy configuration
+   */
+  static validateRetentionPolicy(policy: DataRetentionPolicy): { isValid: boolean; errors: string[] } {
+    const errors: string[] = [];
+    
+    if (!policy.name || policy.name.trim().length === 0) {
+      errors.push('Policy name is required');
+    }
+    
+    if (!policy.description || policy.description.trim().length === 0) {
+      errors.push('Policy description is required');
+    }
+    
+    if (!policy.retentionPeriodDays || policy.retentionPeriodDays <= 0) {
+      errors.push('Retention period must be a positive number');
+    }
+    
+    if (!policy.dataTypes || policy.dataTypes.length === 0) {
+      errors.push('At least one data type must be specified');
+    }
+    
+    if (policy.anonymizeAfterDays && policy.anonymizeAfterDays <= 0) {
+      errors.push('Anonymization period must be a positive number');
+    }
+    
+    if (policy.deleteAfterDays && policy.deleteAfterDays <= 0) {
+      errors.push('Deletion period must be a positive number');
+    }
+    
+    if (policy.anonymizeAfterDays && policy.deleteAfterDays && 
+        policy.anonymizeAfterDays >= policy.deleteAfterDays) {
+      errors.push('Anonymization period must be less than deletion period');
+    }
+    
+    return {
+      isValid: errors.length === 0,
+      errors
+    };
+  }
+
+  /**
+   * Create or update custom retention policy
+   */
+  static async createRetentionPolicy(policy: DataRetentionPolicy): Promise<{ success: boolean; errors: string[] }> {
+    try {
+      const validation = this.validateRetentionPolicy(policy);
+      if (!validation.isValid) {
+        return { success: false, errors: validation.errors };
+      }
+
+      // Log policy creation
+      await this.logDataProcessingActivity(
+        'system',
+        'retention_policy_created',
+        `Created new retention policy: ${policy.name}`,
+        { policy }
+      );
+
+      logger.info(`Created retention policy: ${policy.name}`, { policy });
+      return { success: true, errors: [] };
+    } catch (error) {
+      const errorMsg = `Failed to create retention policy: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      logger.error(errorMsg, { error, policy });
+      return { success: false, errors: [errorMsg] };
+    }
+  }
+
+  /**
+   * Enhanced data anonymization with field-level control
+   */
+  static async anonymizeDataFields(
+    collection: string,
+    documentId: string,
+    fieldsToAnonymize: string[],
+    reason: string
+  ): Promise<{ success: boolean; errors: string[] }> {
+    try {
+      logger.info(`Starting field-level anonymization for ${collection}:${documentId}`, {
+        collection,
+        documentId,
+        fields: fieldsToAnonymize,
+        reason
+      });
+
+      let updateResult;
+      const anonymizationMap: any = {};
+
+      // Build anonymization update object
+      fieldsToAnonymize.forEach(field => {
+        switch (field) {
+          case 'ipAddress':
+            anonymizationMap[field] = '0.0.0.0';
+            break;
+          case 'userAgent':
+            anonymizationMap[field] = 'Anonymized';
+            break;
+          case 'email':
+            anonymizationMap[field] = `anonymized_${Date.now()}_${documentId.slice(-4)}@deleted.local`;
+            break;
+          case 'firstName':
+            anonymizationMap[field] = 'Anonymized User';
+            break;
+          case 'lastName':
+          case 'phone':
+          case 'address':
+            anonymizationMap[field] = '';
+            break;
+          case 'fingerprint':
+            anonymizationMap[field] = 'anonymized';
+            break;
+          default:
+            anonymizationMap[field] = 'anonymized';
+        }
+      });
+
+      // Apply anonymization based on collection type
+      switch (collection) {
+        case 'users':
+          updateResult = await User.findByIdAndUpdate(documentId, { $set: anonymizationMap });
+          break;
+        case 'clickevents':
+          updateResult = await ClickEvent.findByIdAndUpdate(documentId, { $set: anonymizationMap });
+          break;
+        case 'conversionevents':
+          updateResult = await ConversionEvent.findByIdAndUpdate(documentId, { $set: anonymizationMap });
+          break;
+        case 'auditlogs':
+          updateResult = await AuditLog.findByIdAndUpdate(documentId, { $set: anonymizationMap });
+          break;
+        default:
+          throw new Error(`Unsupported collection for field-level anonymization: ${collection}`);
+      }
+
+      if (!updateResult) {
+        throw new Error(`Document not found: ${collection}:${documentId}`);
+      }
+
+      // Log the anonymization activity
+      await this.logDataProcessingActivity(
+        'system',
+        'field_rectification',
+        `Field-level anonymization completed for ${collection}:${documentId}`,
+        {
+          collection,
+          documentId,
+          fieldsAnonymized: fieldsToAnonymize,
+          reason,
+          anonymizationMap
+        }
+      );
+
+      logger.info(`Field-level anonymization completed for ${collection}:${documentId}`, {
+        fieldsAnonymized: fieldsToAnonymize.length
+      });
+
+      return { success: true, errors: [] };
+    } catch (error) {
+      const errorMsg = `Field-level anonymization failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      logger.error(errorMsg, { error, collection, documentId, fieldsToAnonymize });
+      return { success: false, errors: [errorMsg] };
+    }
+  }
+
+  /**
+   * Bulk anonymization with progress tracking
+   */
+  static async bulkAnonymization(
+    dataType: string,
+    criteria: any,
+    batchSize: number = 100
+  ): Promise<{
+    success: boolean;
+    totalProcessed: number;
+    totalAnonymized: number;
+    errors: string[];
+    progress: Array<{ batch: number; processed: number; anonymized: number }>;
+  }> {
+    const result = {
+      success: true,
+      totalProcessed: 0,
+      totalAnonymized: 0,
+      errors: [] as string[],
+      progress: [] as Array<{ batch: number; processed: number; anonymized: number }>
+    };
+
+    try {
+      logger.info(`Starting bulk anonymization for ${dataType}`, { criteria, batchSize });
+
+      let batchNumber = 0;
+      let hasMore = true;
+
+      while (hasMore) {
+        batchNumber++;
+        let batchProcessed = 0;
+        let batchAnonymized = 0;
+
+        try {
+          // Process batch based on data type
+          switch (dataType) {
+            case 'click_events':
+              const clickEvents = await ClickEvent.find(criteria).limit(batchSize);
+              if (clickEvents.length === 0) {
+                hasMore = false;
+                break;
+              }
+
+              for (const event of clickEvents) {
+                if (event.ipAddress !== '0.0.0.0') {
+                  await ClickEvent.findByIdAndUpdate(event._id, {
+                    $set: {
+                      ipAddress: '0.0.0.0',
+                      userAgent: 'Anonymized',
+                      fingerprint: 'anonymized'
+                    }
+                  });
+                  batchAnonymized++;
+                }
+                batchProcessed++;
+              }
+
+              // Update criteria to skip processed records
+              criteria._id = { $gt: clickEvents[clickEvents.length - 1]._id };
+              break;
+
+            case 'conversion_events':
+              const conversionEvents = await ConversionEvent.find(criteria).limit(batchSize);
+              if (conversionEvents.length === 0) {
+                hasMore = false;
+                break;
+              }
+
+              for (const event of conversionEvents) {
+                if (event.ipAddress !== '0.0.0.0') {
+                  await ConversionEvent.findByIdAndUpdate(event._id, {
+                    $set: {
+                      ipAddress: '0.0.0.0',
+                      userAgent: 'Anonymized',
+                      fingerprint: 'anonymized'
+                    }
+                  });
+                  batchAnonymized++;
+                }
+                batchProcessed++;
+              }
+
+              criteria._id = { $gt: conversionEvents[conversionEvents.length - 1]._id };
+              break;
+
+            default:
+              throw new Error(`Unsupported data type for bulk anonymization: ${dataType}`);
+          }
+
+          result.totalProcessed += batchProcessed;
+          result.totalAnonymized += batchAnonymized;
+          result.progress.push({ batch: batchNumber, processed: batchProcessed, anonymized: batchAnonymized });
+
+          logger.info(`Bulk anonymization batch ${batchNumber} completed`, {
+            dataType,
+            batchProcessed,
+            batchAnonymized,
+            totalProcessed: result.totalProcessed
+          });
+
+          // Small delay to prevent overwhelming the database
+          await new Promise(resolve => setTimeout(resolve, 10));
+
+        } catch (batchError) {
+          const errorMsg = `Batch ${batchNumber} failed: ${batchError instanceof Error ? batchError.message : 'Unknown error'}`;
+          result.errors.push(errorMsg);
+          logger.error(errorMsg, { batchError, batchNumber, dataType });
+          
+          // Continue with next batch on error
+          continue;
+        }
+      }
+
+      // Log bulk anonymization completion
+      await this.logDataProcessingActivity(
+        'system',
+        'data_anonymization',
+        `Bulk anonymization completed for ${dataType}`,
+        {
+          dataType,
+          totalProcessed: result.totalProcessed,
+          totalAnonymized: result.totalAnonymized,
+          batchCount: batchNumber,
+          errors: result.errors.length
+        }
+      );
+
+      logger.info(`Bulk anonymization completed for ${dataType}`, {
+        totalProcessed: result.totalProcessed,
+        totalAnonymized: result.totalAnonymized,
+        batchCount: batchNumber,
+        errorCount: result.errors.length
+      });
+
+    } catch (error) {
+      const errorMsg = `Bulk anonymization failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      result.errors.push(errorMsg);
+      result.success = false;
+      logger.error(errorMsg, { error, dataType, criteria });
+    }
+
+    return result;
+  }
+}

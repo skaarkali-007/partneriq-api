@@ -1,0 +1,874 @@
+// import { DataRetentionService } from '../services/dataRetention';
+import { logger } from '../utils/logger';
+
+/**
+ * Data Retention Jobs
+ * Automated jobs for executing data retention policies and cleanup
+ */
+export class DataRetentionJobs {
+  
+  /**
+   * Execute all active data retention policies
+   * This job should be scheduled to run daily
+   */
+  static async executeRetentionPolicies(): Promise<void> {
+    try {
+      logger.info('Starting scheduled data retention policy execution');
+      
+      const reports = await DataRetentionService.executeRetentionPolicies();
+      
+      // Log summary of all policy executions
+      const summary = {
+        totalPolicies: reports.length,
+        totalRecordsProcessed: reports.reduce((sum, r) => sum + r.recordsProcessed, 0),
+        totalRecordsAnonymized: reports.reduce((sum, r) => sum + r.recordsAnonymized, 0),
+        totalRecordsDeleted: reports.reduce((sum, r) => sum + r.recordsDeleted, 0),
+        totalErrors: reports.reduce((sum, r) => sum + r.errors.length, 0),
+        totalDuration: reports.reduce((sum, r) => sum + r.duration, 0)
+      };
+      
+      logger.info('Data retention policy execution completed', {
+        summary,
+        reports: reports.map(r => ({
+          policy: r.policyName,
+          processed: r.recordsProcessed,
+          anonymized: r.recordsAnonymized,
+          deleted: r.recordsDeleted,
+          errors: r.errors.length,
+          duration: r.duration
+        }))
+      });
+      
+      // Log any errors that occurred
+      const allErrors = reports.flatMap(r => r.errors);
+      if (allErrors.length > 0) {
+        logger.warn('Errors occurred during data retention execution', {
+          errorCount: allErrors.length,
+          errors: allErrors
+        });
+      }
+      
+    } catch (error) {
+      logger.error('Data retention policy execution failed', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Generate data retention status report
+   * This job can be run to get current status of retention policies
+   */
+  static async generateRetentionStatusReport(): Promise<{
+    status: any;
+    summary: {
+      activePolicies: number;
+      totalRecordsEligible: number;
+      lastExecution?: Date;
+    };
+  }> {
+    try {
+      logger.info('Generating data retention status report');
+      
+      const status = await DataRetentionService.getRetentionStatus();
+      
+      const summary = {
+        activePolicies: status.policies.filter(p => p.isActive).length,
+        totalRecordsEligible: Object.values(status.recordsEligibleForProcessing)
+          .reduce((sum, count) => sum + count, 0),
+        lastExecution: status.lastExecution
+      };
+      
+      logger.info('Data retention status report generated', {
+        summary,
+        eligibleByPolicy: status.recordsEligibleForProcessing
+      });
+      
+      return { status, summary };
+    } catch (error) {
+      logger.error('Failed to generate data retention status report', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Emergency data cleanup job
+   * Can be used to quickly clean up specific data types when needed
+   */
+  static async emergencyCleanup(
+    dataType: string,
+    olderThanDays: number,
+    dryRun: boolean = true
+  ): Promise<void> {
+    try {
+      logger.info(`Starting emergency cleanup for ${dataType}`, {
+        dataType,
+        olderThanDays,
+        dryRun
+      });
+      
+      const result = await DataRetentionService.manualAnonymization(
+        dataType,
+        olderThanDays,
+        dryRun
+      );
+      
+      if (result.success) {
+        logger.info(`Emergency cleanup ${dryRun ? 'simulation' : 'execution'} completed`, {
+          dataType,
+          recordsProcessed: result.recordsProcessed,
+          dryRun
+        });
+      } else {
+        logger.error('Emergency cleanup failed', {
+          dataType,
+          errors: result.errors
+        });
+        throw new Error(`Emergency cleanup failed: ${result.errors.join(', ')}`);
+      }
+      
+    } catch (error) {
+      logger.error('Emergency cleanup job failed', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        dataType,
+        olderThanDays,
+        dryRun
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Validate all retention policies
+   * This job can be run to ensure all policies are properly configured
+   */
+  static async validateRetentionPolicies(): Promise<{
+    isValid: boolean;
+    policyValidation: Array<{
+      policyName: string;
+      isValid: boolean;
+      errors: string[];
+    }>;
+  }> {
+    try {
+      logger.info('Validating all data retention policies');
+      
+      const status = await DataRetentionService.getRetentionStatus();
+      const validationResults = status.policies.map(policy => ({
+        policyName: policy.name,
+        ...DataRetentionService.validateRetentionPolicy(policy)
+      }));
+      
+      const allValid = validationResults.every(result => result.isValid);
+      
+      logger.info('Data retention policy validation completed', {
+        allValid,
+        validPolicies: validationResults.filter(r => r.isValid).length,
+        invalidPolicies: validationResults.filter(r => !r.isValid).length,
+        results: validationResults
+      });
+      
+      return {
+        isValid: allValid,
+        policyValidation: validationResults
+      };
+      
+    } catch (error) {
+      logger.error('Data retention policy validation failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Automated compliance check job
+   * Runs compliance checks and generates alerts for policy violations
+   */
+  static async runComplianceCheck(): Promise<{
+    compliant: boolean;
+    issues: Array<{
+      severity: 'high' | 'medium' | 'low';
+      category: string;
+      description: string;
+      affectedRecords: number;
+      recommendation: string;
+    }>;
+    summary: {
+      totalIssues: number;
+      highSeverityIssues: number;
+      recordsRequiringAttention: number;
+    };
+  }> {
+    try {
+      logger.info('Starting automated compliance check');
+      
+      const complianceResult = await DataRetentionService.performComplianceCheck();
+      
+      // Log compliance status
+      if (!complianceResult.compliant) {
+        logger.warn('Compliance issues detected', {
+          totalIssues: complianceResult.summary.totalIssues,
+          highSeverityIssues: complianceResult.summary.highSeverityIssues,
+          recordsRequiringAttention: complianceResult.summary.recordsRequiringAttention
+        });
+        
+        // Log high severity issues separately
+        const highSeverityIssues = complianceResult.issues.filter(i => i.severity === 'high');
+        if (highSeverityIssues.length > 0) {
+          logger.error('High severity compliance issues require immediate attention', {
+            issues: highSeverityIssues.map(i => ({
+              category: i.category,
+              description: i.description,
+              affectedRecords: i.affectedRecords
+            }))
+          });
+        }
+      } else {
+        logger.info('Compliance check passed - no issues detected');
+      }
+      
+      return complianceResult;
+    } catch (error) {
+      logger.error('Compliance check failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Bulk anonymization job with progress tracking
+   * Useful for large-scale data anonymization operations
+   */
+  static async performBulkAnonymization(
+    dataType: string,
+    criteria: any,
+    batchSize: number = 100,
+    dryRun: boolean = false
+  ): Promise<{
+    success: boolean;
+    totalProcessed: number;
+    totalAnonymized: number;
+    errors: string[];
+    progress: Array<{ batch: number; processed: number; anonymized: number }>;
+  }> {
+    try {
+      logger.info(`Starting bulk anonymization job for ${dataType}`, {
+        dataType,
+        criteria,
+        batchSize,
+        dryRun
+      });
+      
+      const result = await DataRetentionService.bulkAnonymization(dataType, criteria, batchSize);
+      
+      if (result.success) {
+        logger.info(`Bulk anonymization ${dryRun ? 'simulation' : 'job'} completed successfully`, {
+          dataType,
+          totalProcessed: result.totalProcessed,
+          totalAnonymized: result.totalAnonymized,
+          batchCount: result.progress.length,
+          errorCount: result.errors.length
+        });
+      } else {
+        logger.error('Bulk anonymization job failed', {
+          dataType,
+          errors: result.errors,
+          totalProcessed: result.totalProcessed
+        });
+      }
+      
+      return result;
+    } catch (error) {
+      logger.error('Bulk anonymization job failed', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        dataType,
+        criteria
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Field-level anonymization job
+   * Allows targeted anonymization of specific fields
+   */
+  static async performFieldLevelAnonymization(
+    collection: string,
+    documentIds: string[],
+    fieldsToAnonymize: string[],
+    reason: string
+  ): Promise<{
+    success: boolean;
+    processedDocuments: number;
+    errors: string[];
+  }> {
+    const result = {
+      success: true,
+      processedDocuments: 0,
+      errors: [] as string[]
+    };
+
+    try {
+      logger.info(`Starting field-level anonymization job`, {
+        collection,
+        documentCount: documentIds.length,
+        fields: fieldsToAnonymize,
+        reason
+      });
+
+      for (const documentId of documentIds) {
+        try {
+          const anonymizationResult = await DataRetentionService.anonymizeDataFields(
+            collection,
+            documentId,
+            fieldsToAnonymize,
+            reason
+          );
+
+          if (anonymizationResult.success) {
+            result.processedDocuments++;
+          } else {
+            result.errors.push(...anonymizationResult.errors);
+          }
+        } catch (error) {
+          const errorMsg = `Failed to anonymize ${collection}:${documentId} - ${error instanceof Error ? error.message : 'Unknown error'}`;
+          result.errors.push(errorMsg);
+          logger.error(errorMsg, { error, collection, documentId });
+        }
+      }
+
+      if (result.errors.length > 0) {
+        result.success = false;
+        logger.warn('Field-level anonymization completed with errors', {
+          collection,
+          processedDocuments: result.processedDocuments,
+          errorCount: result.errors.length
+        });
+      } else {
+        logger.info('Field-level anonymization completed successfully', {
+          collection,
+          processedDocuments: result.processedDocuments,
+          fieldsAnonymized: fieldsToAnonymize.length
+        });
+      }
+
+      return result;
+    } catch (error) {
+      logger.error('Field-level anonymization job failed', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        collection,
+        documentIds: documentIds.length
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Data retention policy enforcement job
+   * Ensures all policies are properly configured and active
+   */
+  static async enforceRetentionPolicies(): Promise<{
+    policiesEnforced: number;
+    policiesWithIssues: number;
+    totalRecordsProcessed: number;
+    issues: string[];
+  }> {
+    try {
+      logger.info('Starting data retention policy enforcement');
+      
+      // First validate all policies
+      const validation = await DataRetentionJobs.validateRetentionPolicies();
+      
+      if (!validation.isValid) {
+        logger.error('Policy validation failed - cannot enforce policies', {
+          invalidPolicies: validation.policyValidation.filter(p => !p.isValid).length,
+          issues: validation.policyValidation.filter(p => !p.isValid).map(p => p.errors).flat()
+        });
+        
+        return {
+          policiesEnforced: 0,
+          policiesWithIssues: validation.policyValidation.filter(p => !p.isValid).length,
+          totalRecordsProcessed: 0,
+          issues: validation.policyValidation.filter(p => !p.isValid).map(p => p.errors).flat()
+        };
+      }
+      
+      // Execute retention policies
+      const reports = await DataRetentionService.executeRetentionPolicies();
+      
+      const result = {
+        policiesEnforced: reports.filter(r => r.errors.length === 0).length,
+        policiesWithIssues: reports.filter(r => r.errors.length > 0).length,
+        totalRecordsProcessed: reports.reduce((sum, r) => sum + r.recordsProcessed, 0),
+        issues: reports.flatMap(r => r.errors)
+      };
+      
+      logger.info('Data retention policy enforcement completed', {
+        policiesEnforced: result.policiesEnforced,
+        policiesWithIssues: result.policiesWithIssues,
+        totalRecordsProcessed: result.totalRecordsProcessed,
+        issueCount: result.issues.length
+      });
+      
+      return result;
+    } catch (error) {
+      logger.error('Data retention policy enforcement failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Enhanced automated retention policy enforcement
+   * Ensures all policies are properly configured and executed on schedule
+   */
+  static async enforceAutomatedRetention(): Promise<{
+    success: boolean;
+    policiesExecuted: number;
+    totalRecordsProcessed: number;
+    errors: string[];
+    nextScheduledExecution?: Date;
+  }> {
+    try {
+      logger.info('Starting enhanced automated data retention enforcement');
+      
+      const result = await DataRetentionService.enforceAutomatedRetention();
+      
+      if (result.success) {
+        logger.info('Enhanced automated data retention enforcement completed successfully', {
+          policiesExecuted: result.policiesExecuted,
+          totalRecordsProcessed: result.totalRecordsProcessed,
+          nextScheduledExecution: result.nextScheduledExecution
+        });
+      } else {
+        logger.error('Enhanced automated data retention enforcement completed with errors', {
+          policiesExecuted: result.policiesExecuted,
+          totalRecordsProcessed: result.totalRecordsProcessed,
+          errorCount: result.errors.length,
+          errors: result.errors
+        });
+      }
+      
+      return result;
+    } catch (error) {
+      logger.error('Enhanced automated data retention enforcement failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Advanced anonymization job with configurable strategies
+   */
+  static async performAdvancedAnonymization(
+    dataType: string,
+    anonymizationStrategy: 'full' | 'partial' | 'pseudonymization',
+    criteria: any,
+    options: {
+      batchSize?: number;
+      preserveAnalytics?: boolean;
+      auditTrail?: boolean;
+    } = {}
+  ): Promise<{
+    success: boolean;
+    recordsProcessed: number;
+    anonymizationMethod: string;
+    preservedFields: string[];
+    errors: string[];
+  }> {
+    try {
+      logger.info(`Starting advanced anonymization job for ${dataType}`, {
+        strategy: anonymizationStrategy,
+        criteria,
+        options
+      });
+      
+      const result = await DataRetentionService.advancedAnonymization(
+        dataType,
+        anonymizationStrategy,
+        criteria,
+        options
+      );
+      
+      if (result.success) {
+        logger.info('Advanced anonymization job completed successfully', {
+          dataType,
+          strategy: anonymizationStrategy,
+          recordsProcessed: result.recordsProcessed,
+          preservedFields: result.preservedFields.length,
+          errorCount: result.errors.length
+        });
+      } else {
+        logger.error('Advanced anonymization job completed with errors', {
+          dataType,
+          strategy: anonymizationStrategy,
+          recordsProcessed: result.recordsProcessed,
+          errorCount: result.errors.length,
+          errors: result.errors
+        });
+      }
+      
+      return result;
+    } catch (error) {
+      logger.error('Advanced anonymization job failed', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        dataType,
+        strategy: anonymizationStrategy
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Comprehensive data retention audit job
+   * Performs thorough audit of all data retention policies and compliance
+   */
+  static async performComprehensiveAudit(): Promise<{
+    auditPassed: boolean;
+    policyCompliance: {
+      [policyName: string]: {
+        compliant: boolean;
+        issues: string[];
+        recordsRequiringAttention: number;
+      };
+    };
+    overallCompliance: {
+      compliant: boolean;
+      totalIssues: number;
+      highSeverityIssues: number;
+      recordsRequiringAttention: number;
+    };
+    recommendations: string[];
+  }> {
+    try {
+      logger.info('Starting comprehensive data retention audit');
+      
+      // Get retention status
+      const retentionStatus = await DataRetentionService.getRetentionStatus();
+      
+      // Perform compliance check
+      const complianceResult = await DataRetentionService.performComplianceCheck();
+      
+      // Validate all policies
+      const policyValidation = await DataRetentionJobs.validateRetentionPolicies();
+      
+      // Build policy compliance report
+      const policyCompliance: any = {};
+      for (const policy of retentionStatus.policies) {
+        const validation = policyValidation.policyValidation.find(v => v.policyName === policy.name);
+        const eligibleRecords = retentionStatus.recordsEligibleForProcessing[policy.name] || 0;
+        
+        policyCompliance[policy.name] = {
+          compliant: validation?.isValid && eligibleRecords < 1000, // Threshold for attention
+          issues: validation?.errors || [],
+          recordsRequiringAttention: eligibleRecords
+        };
+      }
+      
+      // Generate recommendations
+      const recommendations: string[] = [];
+      
+      if (!policyValidation.isValid) {
+        recommendations.push('Fix invalid retention policy configurations');
+      }
+      
+      if (complianceResult.summary.highSeverityIssues > 0) {
+        recommendations.push('Address high severity compliance issues immediately');
+      }
+      
+      if (complianceResult.summary.recordsRequiringAttention > 10000) {
+        recommendations.push('Consider more frequent execution of retention policies');
+      }
+      
+      // Check for policies with high eligible record counts
+      Object.entries(retentionStatus.recordsEligibleForProcessing).forEach(([policyName, count]) => {
+        if (count > 5000) {
+          recommendations.push(`Policy '${policyName}' has ${count} records requiring attention`);
+        }
+      });
+      
+      const auditResult = {
+        auditPassed: complianceResult.compliant && policyValidation.isValid,
+        policyCompliance,
+        overallCompliance: complianceResult,
+        recommendations
+      };
+      
+      logger.info('Comprehensive data retention audit completed', {
+        auditPassed: auditResult.auditPassed,
+        totalPolicies: retentionStatus.policies.length,
+        compliantPolicies: Object.values(policyCompliance).filter((p: any) => p.compliant).length,
+        recommendationCount: recommendations.length
+      });
+      
+      return auditResult;
+    } catch (error) {
+      logger.error('Comprehensive data retention audit failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Data retention policy optimization job
+   * Analyzes current data patterns and suggests policy optimizations
+   */
+  static async optimizeRetentionPolicies(): Promise<{
+    currentEfficiency: number;
+    optimizationSuggestions: Array<{
+      policyName: string;
+      currentSettings: any;
+      suggestedSettings: any;
+      expectedImpact: string;
+      reasoning: string;
+    }>;
+    estimatedImprovements: {
+      storageReduction: number;
+      processingTimeReduction: number;
+      complianceImprovement: number;
+    };
+  }> {
+    try {
+      logger.info('Starting data retention policy optimization analysis');
+      
+      // Get current data growth metrics
+      const dataGrowthMetrics = await DataRetentionJobs.monitorDataGrowth();
+      
+      // Get retention status
+      const retentionStatus = await DataRetentionService.getRetentionStatus();
+      
+      // Analyze efficiency
+      let totalRecords = 0;
+      let anonymizedRecords = 0;
+      
+      Object.values(dataGrowthMetrics.dataGrowthMetrics).forEach((metrics: any) => {
+        totalRecords += metrics.totalRecords;
+        anonymizedRecords += metrics.anonymizedRecords;
+      });
+      
+      const currentEfficiency = totalRecords > 0 ? (anonymizedRecords / totalRecords) * 100 : 0;
+      
+      // Generate optimization suggestions
+      const optimizationSuggestions: any[] = [];
+      
+      // Analyze each policy
+      for (const policy of retentionStatus.policies) {
+        const eligibleRecords = retentionStatus.recordsEligibleForProcessing[policy.name] || 0;
+        
+        if (eligibleRecords > 1000) {
+          // Suggest more aggressive anonymization
+          optimizationSuggestions.push({
+            policyName: policy.name,
+            currentSettings: {
+              anonymizeAfterDays: policy.anonymizeAfterDays,
+              deleteAfterDays: policy.deleteAfterDays
+            },
+            suggestedSettings: {
+              anonymizeAfterDays: Math.max(30, (policy.anonymizeAfterDays || 90) * 0.8),
+              deleteAfterDays: policy.deleteAfterDays
+            },
+            expectedImpact: `Reduce eligible records by ~${Math.floor(eligibleRecords * 0.2)}`,
+            reasoning: `High number of eligible records (${eligibleRecords}) suggests more frequent anonymization needed`
+          });
+        }
+        
+        if (policy.name === 'user_tracking_data' && eligibleRecords > 5000) {
+          // Suggest shorter retention for tracking data
+          optimizationSuggestions.push({
+            policyName: policy.name,
+            currentSettings: {
+              anonymizeAfterDays: policy.anonymizeAfterDays,
+              deleteAfterDays: policy.deleteAfterDays
+            },
+            suggestedSettings: {
+              anonymizeAfterDays: 60, // Reduce from 90 to 60 days
+              deleteAfterDays: 180   // Reduce from 365 to 180 days
+            },
+            expectedImpact: 'Significant storage reduction for tracking data',
+            reasoning: 'Tracking data has limited business value after 60 days'
+          });
+        }
+      }
+      
+      // Estimate improvements
+      const estimatedImprovements = {
+        storageReduction: optimizationSuggestions.length * 15, // Estimated % reduction
+        processingTimeReduction: optimizationSuggestions.length * 10, // Estimated % reduction
+        complianceImprovement: Math.min(100 - currentEfficiency, 20) // Up to 20% improvement
+      };
+      
+      const result = {
+        currentEfficiency,
+        optimizationSuggestions,
+        estimatedImprovements
+      };
+      
+      logger.info('Data retention policy optimization analysis completed', {
+        currentEfficiency,
+        suggestionCount: optimizationSuggestions.length,
+        estimatedStorageReduction: estimatedImprovements.storageReduction
+      });
+      
+      return result;
+    } catch (error) {
+      logger.error('Data retention policy optimization failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Monitor data growth and retention effectiveness
+   * This job tracks how well retention policies are managing data growth
+   */
+  static async monitorDataGrowth(): Promise<{
+    dataGrowthMetrics: {
+      [collection: string]: {
+        totalRecords: number;
+        recordsOlderThan30Days: number;
+        recordsOlderThan90Days: number;
+        recordsOlderThan365Days: number;
+        anonymizedRecords: number;
+      };
+    };
+    recommendations: string[];
+  }> {
+    try {
+      logger.info('Starting data growth monitoring');
+      
+      const now = new Date();
+      const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      const oneYearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+      
+      // Import models dynamically to avoid circular dependencies
+      const { ClickEvent } = await import('../models/ClickEvent');
+      const { ConversionEvent } = await import('../models/ConversionEvent');
+      const { AuditLog } = await import('../models/AuditLog');
+      const { User } = await import('../models/User');
+      const { UserProfile } = await import('../models/UserProfile');
+      
+      const dataGrowthMetrics: any = {};
+      const recommendations: string[] = [];
+      
+      // Monitor click events
+      const clickEventMetrics = {
+        totalRecords: await ClickEvent.countDocuments(),
+        recordsOlderThan30Days: await ClickEvent.countDocuments({
+          timestamp: { $lt: thirtyDaysAgo }
+        }),
+        recordsOlderThan90Days: await ClickEvent.countDocuments({
+          timestamp: { $lt: ninetyDaysAgo }
+        }),
+        recordsOlderThan365Days: await ClickEvent.countDocuments({
+          timestamp: { $lt: oneYearAgo }
+        }),
+        anonymizedRecords: await ClickEvent.countDocuments({
+          ipAddress: '0.0.0.0'
+        })
+      };
+      dataGrowthMetrics.clickEvents = clickEventMetrics;
+      
+      // Monitor conversion events
+      const conversionEventMetrics = {
+        totalRecords: await ConversionEvent.countDocuments(),
+        recordsOlderThan30Days: await ConversionEvent.countDocuments({
+          conversionTimestamp: { $lt: thirtyDaysAgo }
+        }),
+        recordsOlderThan90Days: await ConversionEvent.countDocuments({
+          conversionTimestamp: { $lt: ninetyDaysAgo }
+        }),
+        recordsOlderThan365Days: await ConversionEvent.countDocuments({
+          conversionTimestamp: { $lt: oneYearAgo }
+        }),
+        anonymizedRecords: await ConversionEvent.countDocuments({
+          ipAddress: '0.0.0.0'
+        })
+      };
+      dataGrowthMetrics.conversionEvents = conversionEventMetrics;
+      
+      // Monitor audit logs
+      const auditLogMetrics = {
+        totalRecords: await AuditLog.countDocuments(),
+        recordsOlderThan30Days: await AuditLog.countDocuments({
+          timestamp: { $lt: thirtyDaysAgo }
+        }),
+        recordsOlderThan90Days: await AuditLog.countDocuments({
+          timestamp: { $lt: ninetyDaysAgo }
+        }),
+        recordsOlderThan365Days: await AuditLog.countDocuments({
+          timestamp: { $lt: oneYearAgo }
+        }),
+        anonymizedRecords: await AuditLog.countDocuments({
+          ipAddress: '0.0.0.0'
+        })
+      };
+      dataGrowthMetrics.auditLogs = auditLogMetrics;
+      
+      // Monitor users
+      const userMetrics = {
+        totalRecords: await User.countDocuments(),
+        recordsOlderThan30Days: await User.countDocuments({
+          createdAt: { $lt: thirtyDaysAgo }
+        }),
+        recordsOlderThan90Days: await User.countDocuments({
+          createdAt: { $lt: ninetyDaysAgo }
+        }),
+        recordsOlderThan365Days: await User.countDocuments({
+          createdAt: { $lt: oneYearAgo }
+        }),
+        anonymizedRecords: await User.countDocuments({
+          firstName: 'Anonymized User'
+        })
+      };
+      dataGrowthMetrics.users = userMetrics;
+      
+      // Generate recommendations based on metrics
+      if (clickEventMetrics.recordsOlderThan90Days > 10000) {
+        recommendations.push('Consider more aggressive cleanup of click events older than 90 days');
+      }
+      
+      if (auditLogMetrics.recordsOlderThan365Days > 50000) {
+        recommendations.push('Audit log retention period may need adjustment - consider archiving old logs');
+      }
+      
+      if (userMetrics.anonymizedRecords / userMetrics.totalRecords < 0.1 && userMetrics.recordsOlderThan365Days > 100) {
+        recommendations.push('User anonymization rate is low - review inactive user policies');
+      }
+      
+      // Check anonymization effectiveness
+      Object.entries(dataGrowthMetrics).forEach(([collection, metrics]: [string, any]) => {
+        const anonymizationRate = metrics.anonymizedRecords / metrics.totalRecords;
+        if (anonymizationRate < 0.05 && metrics.recordsOlderThan90Days > 1000) {
+          recommendations.push(`Low anonymization rate in ${collection} - review retention policies`);
+        }
+      });
+      
+      logger.info('Data growth monitoring completed', {
+        dataGrowthMetrics,
+        recommendationCount: recommendations.length
+      });
+      
+      return {
+        dataGrowthMetrics,
+        recommendations
+      };
+      
+    } catch (error) {
+      logger.error('Data growth monitoring failed', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      throw error;
+    }
+  }
+}
