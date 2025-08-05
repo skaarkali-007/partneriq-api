@@ -16,7 +16,7 @@ export interface MFAVerificationResult {
 }
 
 export class MFAService {
-  private static readonly APP_NAME = 'Financial Affiliate Platform';
+  private static readonly APP_NAME = 'Partner IQ';
   private static readonly BACKUP_CODES_COUNT = 8;
   private static readonly BACKUP_CODE_LENGTH = 8;
 

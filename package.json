@@ -1,7 +1,7 @@
 {
-  "name": "financial-affiliate-backend",
+  "name": "partner-iq-backend",
   "version": "1.0.0",
-  "description": "Financial affiliate platform backend API",
+  "description": "Partner IQ platform backend API",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
