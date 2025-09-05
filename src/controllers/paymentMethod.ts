@@ -67,9 +67,9 @@ export const createPaymentMethod = async (req: Request, res: Response) => {
     if (methodType === 'bank_transfer') {
       if (!accountDetails.accountNumber) validationErrors.push({ field: 'accountDetails.accountNumber', message: 'Account number is required for bank transfer' });
       if (!accountDetails.routingNumber) validationErrors.push({ field: 'accountDetails.routingNumber', message: 'Routing number is required for bank transfer' });
-      if (!accountDetails.bankName) validationErrors.push({ field: 'accountDetails.bankName', message: 'Bank name is required for bank transfer' });
+      //if (!accountDetails.bankName) validationErrors.push({ field: 'accountDetails.bankName', message: 'Bank name is required for bank transfer' });
       if (!accountDetails.accountHolderName) validationErrors.push({ field: 'accountDetails.accountHolderName', message: 'Account holder name is required for bank transfer' });
-      if (!accountDetails.country) validationErrors.push({ field: 'accountDetails.country', message: 'Country is required for bank transfer' });
+      //if (!accountDetails.country) validationErrors.push({ field: 'accountDetails.country', message: 'Country is required for bank transfer' });
     } else if (methodType === 'paypal') {
       if (!accountDetails.paypalEmail) validationErrors.push({ field: 'accountDetails.paypalEmail', message: 'PayPal email is required for PayPal payments' });
       if (!accountDetails.country) validationErrors.push({ field: 'accountDetails.country', message: 'Country is required for PayPal payments' });

@@ -48,11 +48,14 @@ const auditLogSchema = new Schema<IAuditLog>({
       'commission_rejected',
       'commission_clawback',
       'commission_adjustment',
+      'commission_status_changed',
       
       // Payout management actions
       'payout_approved',
       'payout_rejected',
       'payout_processed',
+      "payout_status_changed",
+      "payout_bulk_action",
       'bulk_payout_processed',
       
       // System actions
@@ -61,6 +64,14 @@ const auditLogSchema = new Schema<IAuditLog>({
       'settings_changed',
       'report_generated',
       'data_export',
+      
+      // Admin security and access actions
+      'admin_sensitive_operation_access',
+      'unauthorized_admin_access_attempt',
+      'admin_mfa_verification_failed',
+      'admin_mfa_verified',
+      'admin_rate_limit_exceeded',
+      'admin_activity',
       
       // Data retention and GDPR actions
       'retention_policy_started',

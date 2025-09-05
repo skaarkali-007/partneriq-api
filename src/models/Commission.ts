@@ -7,7 +7,8 @@ export interface ICommission extends Document {
   productId: string;
   trackingCode: string;
   initialSpendAmount: number;
-  commissionRate: number;
+  commissionRate?: number;
+  commissionFlatAmount?: number;
   commissionAmount: number;
   status: 'pending' | 'approved' | 'paid' | 'clawed_back' | 'rejected';
   conversionDate: Date;
@@ -45,10 +46,16 @@ const commissionSchema = new Schema<ICommission>({
   },
   commissionRate: {
     type: Number,
-    required: [true, 'Commission rate is required'],
+    //required: [true, 'Commission rate is required'],
     min: [0, 'Commission rate cannot be negative'],
     max: [1, 'Commission rate cannot exceed 100%']
   },
+  commissionFlatAmount: {
+    type: Number,
+    //required: [true, 'Commission rate is required'],
+    min: [0, 'Commission rate cannot be negative'],
+  },
+
   commissionAmount: {
     type: Number,
     required: [true, 'Commission amount is required'],

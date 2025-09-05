@@ -89,6 +89,7 @@ export class ProductController {
     try {
       // Validate request body
       const { error, value } = createProductSchema.validate(req.body);
+      console.log("value:", value)
       if (error) {
         return res.status(400).json({
           success: false,

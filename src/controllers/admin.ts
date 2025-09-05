@@ -758,11 +758,43 @@ export class AdminController {
     try {
       const productData = req.body;
 
+      console.log("req.body:", req.body)
+
       // Validate required fields
       if (!productData.name || !productData.description || !productData.category) {
         return res.status(400).json({
           success: false,
           error: 'Name, description, and category are required'
+        });
+      }
+
+      // Validate additional required fields
+      if (!productData.landingPageUrl) {
+        return res.status(400).json({
+          success: false,
+          error: 'Landing page URL is required'
+        });
+      }
+
+      if (productData.minInitialSpend === undefined || productData.minInitialSpend === null) {
+        return res.status(400).json({
+          success: false,
+          error: 'Minimum initial spend is required'
+        });
+      }
+
+      // Validate commission structure
+      if (productData.commissionType === 'percentage' && (productData.commissionRate === undefined || productData.commissionRate === null)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Commission rate is required for percentage-based commissions'
+        });
+      }
+
+      if (productData.commissionType === 'flat' && (productData.commissionFlatAmount === undefined || productData.commissionFlatAmount === null)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Commission flat amount is required for flat-rate commissions'
         });
       }
 

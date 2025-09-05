@@ -284,6 +284,7 @@ export const updateCustomerPayment = async (req: Request, res: Response) => {
     const { initialSpendAmount, paymentStatus, paymentMethod, paymentDate, reason } = req.body;
     const adminId = req.user?.id;
 
+
     if (!reason) {
       return res.status(400).json({
         success: false,
@@ -309,13 +310,20 @@ export const updateCustomerPayment = async (req: Request, res: Response) => {
       paymentDate
     };
 
-    await customer.updatePaymentInfo(paymentData, reason, adminId);
+    const cust = await customer.updatePaymentInfo(paymentData, reason, adminId);
+    console.log("")
+          console.log("")
+      
+          console.log("cust: ", cust)
+          
+          console.log("")
+          console.log("")
 
     // If spend amount changed and customer has a commission, recalculate
     if (initialSpendAmount !== undefined && 
         initialSpendAmount !== oldSpendAmount && 
         customer.commissionId && 
-        oldSpendAmount !== undefined) {
+        oldSpendAmount !== undefined) {    
       await recalculateCommission(customer, oldSpendAmount, initialSpendAmount);
     }
 
@@ -323,6 +331,13 @@ export const updateCustomerPayment = async (req: Request, res: Response) => {
     if (customer.onboardingStatus === 'completed' && 
         customer.initialSpendAmount && 
         !customer.commissionId) {
+          console.log("")
+          console.log("")
+      
+          console.log("recalc: ")
+          
+          console.log("")
+          console.log("")
       await createCommissionForCustomer(customer);
     }
 
@@ -421,12 +436,18 @@ async function createCommissionForCustomer(customer: any) {
   try {
     // Get product to determine commission rate
     const product = await Product.findById(customer.productId);
-    if (!product || !product.commissionRate) {
+    console.log("Product: ", product)
+    if (!product ) {
+      console.log("Here")
       return;
     }
 
+    // if(!product.commissionRate || !product.commissionFlatAmount){
+    //   return
+    // }
+
     // Calculate commission amount
-    const commissionAmount = customer.initialSpendAmount * (product.commissionRate / 100);
+    const commissionAmount = product.commissionRate ? customer.initialSpendAmount * (product.commissionRate) : product.commissionFlatAmount ? product.commissionFlatAmount : 0;
 
     // Create commission record
     const commission = new Commission({
@@ -435,7 +456,8 @@ async function createCommissionForCustomer(customer: any) {
       productId: customer.productId,
       trackingCode: customer.trackingCode,
       commissionAmount: commissionAmount,
-      commissionRate: product.commissionRate / 100, // Convert percentage to decimal
+      commissionRate: product.commissionRate || 0, // Convert percentage to decimal
+      commissionFlatAmount: product.commissionFlatAmount || 0,
       initialSpendAmount: customer.initialSpendAmount,
       status: 'pending',
       conversionDate: customer.completedAt || new Date()
@@ -463,12 +485,12 @@ async function recalculateCommission(customer: any, oldAmount: number, newAmount
     }
 
     const product = await Product.findById(customer.productId);
-    if (!product || !product.commissionRate) {
+    if (!product || !product.commissionRate || !product.commissionFlatAmount) {
       return;
     }
 
     // Calculate new commission amount
-    const newCommissionAmount = newAmount * (product.commissionRate / 100);
+    const newCommissionAmount = product.commissionRate ? newAmount * (product.commissionRate) : product.commissionFlatAmount ? product.commissionFlatAmount : 0;
     const oldCommissionAmount = commission.commissionAmount;
 
     // Update commission record
