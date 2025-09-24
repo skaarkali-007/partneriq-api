@@ -1,12 +1,7 @@
 import nodemailer from 'nodemailer';
 import { logger } from '../../utils/logger';
-import { Resend } from "resend";
 import {config} from "dotenv"
 config()
-
-
-const resendApiKey = process.env.RESEND_API as string
-const resend = new Resend(resendApiKey);
 
 // Create transporter - always use Gmail for actual email sending
 const createTransporter = () => {
@@ -51,30 +46,21 @@ export const sendVerificationEmail = async (email: string, token: string) => {
         </div>
       `
     };
-
-    const { data, error } = await resend.emails.send(
-        mailOptions
-    );
-    
-    if (error) {
-      throw error;
-    }
-
   
     logger.info(`Verification email sent to ${email}`);
     
     // Always try to send email if credentials are available
-    // if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
-    //   // Log to console if no email credentials
-    //   logger.info(`Email would be sent to ${email}:`);
-    //   logger.info(`Subject: ${mailOptions.subject}`);
-    //   logger.info(`Verification URL: ${verificationUrl}`);
-    // } else {
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+      // Log to console if no email credentials
+      logger.info(`Email would be sent to ${email}:`);
+      logger.info(`Subject: ${mailOptions.subject}`);
+      logger.info(`Verification URL: ${verificationUrl}`);
+    } else {
       
-    //   // Send actual email
-    //   await transporter.sendMail(mailOptions);
-    //   logger.info(`Verification email sent to ${email}`);
-    // }
+      // Send actual email
+      await transporter.sendMail(mailOptions);
+      logger.info(`Verification email sent to ${email}`);
+    }
   } catch (error) {
     logger.error('Failed to send verification email:', error);
     throw error;
@@ -100,29 +86,20 @@ export const sendOTPEmail = async (email: string, otp: string) => {
         </div>
       `
     };
-
-      const { data, error } = await resend.emails.send(
-        mailOptions
-    );
-    
-    if (error) {
-      throw error;
-    }
-
   
     logger.info(`Verification email sent to ${email}`);
     
-    // Always try to send email if credentials are available
-    // if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
-    //   // Log to console if no email credentials
-    //   logger.info(`OTP Email would be sent to ${email}:`);
-    //   logger.info(`Subject: ${mailOptions.subject}`);
-    //   logger.info(`OTP Code: ${otp}`);
-    // } else {
-    //   // Send actual email
-    //   await transporter.sendMail(mailOptions);
-    //   logger.info(`OTP email sent to ${email}`);
-    // }
+    //Always try to send email if credentials are available
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+      // Log to console if no email credentials
+      logger.info(`OTP Email would be sent to ${email}:`);
+      logger.info(`Subject: ${mailOptions.subject}`);
+      logger.info(`OTP Code: ${otp}`);
+    } else {
+      // Send actual email
+      await transporter.sendMail(mailOptions);
+      logger.info(`OTP email sent to ${email}`);
+    }
   } catch (error) {
     logger.error('Failed to send OTP email:', error);
     throw error;
