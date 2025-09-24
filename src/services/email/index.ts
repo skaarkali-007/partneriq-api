@@ -1,5 +1,12 @@
 import nodemailer from 'nodemailer';
 import { logger } from '../../utils/logger';
+import { Resend } from "resend";
+import {config} from "dotenv"
+config()
+
+
+const resendApiKey = process.env.RESEND_API as string
+const resend = new Resend(resendApiKey);
 
 // Create transporter - always use Gmail for actual email sending
 const createTransporter = () => {
@@ -15,7 +22,7 @@ const createTransporter = () => {
 
   // Use Gmail for actual email sending
   return nodemailer.createTransport({
-    service: 'gmail',
+    host: "mail.privateemail.com",
     auth: {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASSWORD
@@ -30,7 +37,7 @@ export const sendVerificationEmail = async (email: string, token: string) => {
     const verificationUrl = `${process.env.FRONTEND_URL}/verify-email/${token}`;
     
     const mailOptions = {
-      from: process.env.EMAIL_FROM || 'noreply@financialaffiliate.com',
+      from: process.env.EMAIL_FROM || 'noreply@partneriq.online',
       to: email,
       subject: 'Verify Your Email Address',
       html: `
@@ -44,18 +51,30 @@ export const sendVerificationEmail = async (email: string, token: string) => {
         </div>
       `
     };
+
+    const { data, error } = await resend.emails.send(
+        mailOptions
+    );
+    
+    if (error) {
+      throw error;
+    }
+
+  
+    logger.info(`Verification email sent to ${email}`);
     
     // Always try to send email if credentials are available
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
-      // Log to console if no email credentials
-      logger.info(`Email would be sent to ${email}:`);
-      logger.info(`Subject: ${mailOptions.subject}`);
-      logger.info(`Verification URL: ${verificationUrl}`);
-    } else {
-      // Send actual email
-      await transporter.sendMail(mailOptions);
-      logger.info(`Verification email sent to ${email}`);
-    }
+    // if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+    //   // Log to console if no email credentials
+    //   logger.info(`Email would be sent to ${email}:`);
+    //   logger.info(`Subject: ${mailOptions.subject}`);
+    //   logger.info(`Verification URL: ${verificationUrl}`);
+    // } else {
+      
+    //   // Send actual email
+    //   await transporter.sendMail(mailOptions);
+    //   logger.info(`Verification email sent to ${email}`);
+    // }
   } catch (error) {
     logger.error('Failed to send verification email:', error);
     throw error;
@@ -65,7 +84,7 @@ export const sendVerificationEmail = async (email: string, token: string) => {
 export const sendOTPEmail = async (email: string, otp: string) => {
   try {
     const mailOptions = {
-      from: process.env.EMAIL_FROM || 'noreply@financialaffiliate.com',
+      from: process.env.EMAIL_FROM || 'noreply@partneriq.online',
       to: email,
       subject: 'Email Verification Code',
       html: `
@@ -81,18 +100,29 @@ export const sendOTPEmail = async (email: string, otp: string) => {
         </div>
       `
     };
+
+      const { data, error } = await resend.emails.send(
+        mailOptions
+    );
+    
+    if (error) {
+      throw error;
+    }
+
+  
+    logger.info(`Verification email sent to ${email}`);
     
     // Always try to send email if credentials are available
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
-      // Log to console if no email credentials
-      logger.info(`OTP Email would be sent to ${email}:`);
-      logger.info(`Subject: ${mailOptions.subject}`);
-      logger.info(`OTP Code: ${otp}`);
-    } else {
-      // Send actual email
-      await transporter.sendMail(mailOptions);
-      logger.info(`OTP email sent to ${email}`);
-    }
+    // if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+    //   // Log to console if no email credentials
+    //   logger.info(`OTP Email would be sent to ${email}:`);
+    //   logger.info(`Subject: ${mailOptions.subject}`);
+    //   logger.info(`OTP Code: ${otp}`);
+    // } else {
+    //   // Send actual email
+    //   await transporter.sendMail(mailOptions);
+    //   logger.info(`OTP email sent to ${email}`);
+    // }
   } catch (error) {
     logger.error('Failed to send OTP email:', error);
     throw error;
