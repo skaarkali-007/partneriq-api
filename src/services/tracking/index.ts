@@ -7,6 +7,7 @@ import { logger } from '../../utils/logger';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { EventEmitter } from 'events';
+import {config} from "dotenv"
 
 export interface CreateReferralLinkData {
   marketerId: string;
