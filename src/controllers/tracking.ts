@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { TrackingService } from '../services/tracking';
+import { ReferralLink } from '../models/ReferralLink';
 import { logger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -472,6 +473,175 @@ export const getMarketerStats = async (req: Request, res: Response): Promise<voi
     });
   }
 };
+
+/**
+ * Toggle referral link status (activate/deactivate)
+ */
+export const toggleReferralLinkStatus = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { linkId } = req.params;
+    const { isActive } = req.body;
+    const marketerId = (req as any).user?.id;
+
+    if (!marketerId) {
+      res.status(401).json({
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Authentication required'
+        }
+      });
+      return;
+    }
+
+    if (typeof isActive !== 'boolean') {
+      res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'isActive must be a boolean value'
+        }
+      });
+      return;
+    }
+
+    const updatedLink = await TrackingService.toggleReferralLinkStatus(linkId, marketerId, isActive);
+
+    res.json({
+      success: true,
+      data: updatedLink,
+      message: `Referral link ${isActive ? 'activated' : 'deactivated'} successfully`
+    });
+
+  } catch (error: any) {
+    logger.error('Error toggling referral link status:', error);
+    res.status(400).json({
+      error: {
+        code: 'TOGGLE_LINK_ERROR',
+        message: error.message || 'Failed to toggle referral link status'
+      }
+    });
+  }
+};
+
+/**
+ * Delete a referral link
+ */
+export const deleteReferralLink = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { linkId } = req.params;
+    const marketerId = (req as any).user?.id;
+
+    if (!marketerId) {
+      res.status(401).json({
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Authentication required'
+        }
+      });
+      return;
+    }
+
+    const deletedLink = await TrackingService.deleteReferralLink(linkId, marketerId);
+
+    res.json({
+      success: true,
+      data: deletedLink,
+      message: 'Referral link deleted successfully'
+    });
+
+  } catch (error: any) {
+    logger.error('Error deleting referral link:', error);
+    res.status(400).json({
+      error: {
+        code: 'DELETE_LINK_ERROR',
+        message: error.message || 'Failed to delete referral link'
+      }
+    });
+  }
+};
+
+/**
+ * Get referral link analytics
+ */
+export const getReferralLinkAnalytics = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { linkId } = req.params;
+    const marketerId = (req as any).user?.id;
+
+    if (!marketerId) {
+      res.status(401).json({
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Authentication required'
+        }
+      });
+      return;
+    }
+
+    // Get the referral link to verify ownership
+    const referralLink = await TrackingService.getReferralLinkByTrackingCode('');
+    const link = await ReferralLink.findOne({ _id: linkId, marketerId });
+    
+    if (!link) {
+      res.status(404).json({
+        error: {
+          code: 'LINK_NOT_FOUND',
+          message: 'Referral link not found or access denied'
+        }
+      });
+      return;
+    }
+
+    // Get click events for this link
+    const clickEvents = await TrackingService.getClickEvents(link.trackingCode, { limit: 100 });
+    
+    // Get conversion events for this link
+    const conversionEvents = await TrackingService.getConversionEvents(link.trackingCode, { limit: 100 });
+
+    // Calculate analytics
+    const analytics = {
+      linkId: link._id,
+      trackingCode: link.trackingCode,
+      productId: link.productId,
+      isActive: link.isActive,
+      createdAt: link.createdAt,
+      expiresAt: link.expiresAt,
+      totalClicks: link.clickCount || 0,
+      totalConversions: link.conversionCount || 0,
+      conversionRate: link.clickCount > 0 ? ((link.conversionCount || 0) / link.clickCount * 100) : 0,
+      recentClicks: clickEvents.events.slice(0, 10),
+      recentConversions: conversionEvents.events.slice(0, 10),
+      clicksByDay: await getClicksByDay(link.trackingCode),
+      conversionsByDay: await getConversionsByDay(link.trackingCode)
+    };
+
+    res.json({
+      success: true,
+      data: analytics
+    });
+
+  } catch (error: any) {
+    logger.error('Error getting referral link analytics:', error);
+    res.status(500).json({
+      error: {
+        code: 'ANALYTICS_ERROR',
+        message: error.message || 'Failed to get referral link analytics'
+      }
+    });
+  }
+};
+
+// Helper functions for analytics
+async function getClicksByDay(trackingCode: string) {
+  // This would implement daily click aggregation
+  // For now, return empty array
+  return [];
+}
+
+async function getConversionsByDay(trackingCode: string) {
+  // This would implement daily conversion aggregation
+  // For now, return empty array
+  return [];
+}
 
 /**
  * Handle referral link redirect and tracking

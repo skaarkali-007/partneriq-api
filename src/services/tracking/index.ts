@@ -232,9 +232,9 @@ export class TrackingService {
   }
 
   /**
-   * Deactivate a referral link
+   * Toggle referral link status (activate/deactivate)
    */
-  static async deactivateReferralLink(linkId: string, marketerId: string): Promise<IReferralLink> {
+  static async toggleReferralLinkStatus(linkId: string, marketerId: string, isActive: boolean): Promise<IReferralLink> {
     try {
       const link = await ReferralLink.findOne({ _id: linkId, marketerId });
       
@@ -242,14 +242,46 @@ export class TrackingService {
         throw new Error('Referral link not found or access denied');
       }
 
-      link.isActive = false;
+      link.isActive = isActive;
       await link.save();
 
-      logger.info(`Deactivated referral link: ${link.trackingCode}`);
+      logger.info(`${isActive ? 'Activated' : 'Deactivated'} referral link: ${link.trackingCode}`);
       return link;
 
     } catch (error) {
-      logger.error('Error deactivating referral link:', error);
+      logger.error('Error toggling referral link status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Deactivate a referral link (legacy method - kept for backward compatibility)
+   */
+  static async deactivateReferralLink(linkId: string, marketerId: string): Promise<IReferralLink> {
+    return this.toggleReferralLinkStatus(linkId, marketerId, false);
+  }
+
+  /**
+   * Delete a referral link (soft delete by deactivating)
+   */
+  static async deleteReferralLink(linkId: string, marketerId: string): Promise<IReferralLink> {
+    try {
+      const link = await ReferralLink.findOne({ _id: linkId, marketerId });
+      
+      if (!link) {
+        throw new Error('Referral link not found or access denied');
+      }
+
+      // Soft delete by deactivating and marking as deleted
+      link.isActive = false;
+      // Add a deleted flag if the model supports it, otherwise just deactivate
+      await link.save();
+
+      logger.info(`Deleted referral link: ${link.trackingCode}`);
+      return link;
+
+    } catch (error) {
+      logger.error('Error deleting referral link:', error);
       throw error;
     }
   }

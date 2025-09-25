@@ -53,6 +53,7 @@ export const getDashboardData = async (req: Request, res: Response) => {
           id: link._id,
           product: (link.productId as any)?.name || 'N/A',
           url: link.linkUrl,
+          isActive: link.isActive,
           trackingCode: link.trackingCode,
           clickCount: link.clickCount || 0,
           conversionCount: link.conversionCount || 0,

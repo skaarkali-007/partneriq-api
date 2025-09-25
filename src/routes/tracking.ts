@@ -20,6 +20,9 @@ router.use(authenticate);
 // Referral link management routes
 router.post('/links', TrackingController.createReferralLink);
 router.get('/links/:marketerId', TrackingController.getMarketerReferralLinks);
+router.put('/links/:linkId/status', TrackingController.toggleReferralLinkStatus);
+router.delete('/links/:linkId', TrackingController.deleteReferralLink);
+router.get('/links/:linkId/analytics', TrackingController.getReferralLinkAnalytics);
 
 // Click and conversion tracking data routes
 router.get('/clicks/:trackingCode', TrackingController.getClickEvents);
