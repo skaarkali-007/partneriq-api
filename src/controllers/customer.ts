@@ -1,30 +1,15 @@
 import { Request, Response } from 'express';
-import { Customer, ICustomer } from '../models/Customer';
+import { Customer } from '../models/Customer';
 import { ReferralLink } from '../models/ReferralLink';
 import { Product } from '../models/Product';
 import { OnboardingService } from '../services/onboarding';
+import { cloudinaryService } from '../services/cloudinary';
 import multer from 'multer';
 import path from 'path';
-import fs from 'fs';
-import { v4 as uuidv4 } from 'uuid';
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = 'uploads/kyc';
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = `${uuidv4()}${path.extname(file.originalname)}`;
-    cb(null, uniqueName);
-  }
-});
-
+// Configure multer for file uploads (memory storage for Cloudinary)
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: {
     fileSize: 10 * 1024 * 1024 // 10MB limit
   },
@@ -297,31 +282,64 @@ export const uploadKYCDocuments = async (req: Request, res: Response) => {
         message: 'Customer not found'
       });
     }
-    
-    // Process uploaded files
-    const documents = files.map(file => ({
-      type: req.body.documentTypes?.[files.indexOf(file)] || 'other',
-      fileName: file.originalname,
-      fileUrl: `/uploads/kyc/${file.filename}`,
-      uploadedAt: new Date()
-    }));
-    
-    // Add documents to customer
-    for (const document of documents) {
-      await customer.addKYCDocument(document);
+
+    // Check if Cloudinary is configured
+    if (!cloudinaryService.isReady()) {
+      return res.status(500).json({
+        success: false,
+        message: 'File upload service is not configured. Please contact support.'
+      });
     }
     
-    await customer.updateOnboardingStep(3, 'kyc_documents');
-    
-    res.json({
-      success: true,
-      data: {
-        customerId: customer._id,
-        currentStep: customer.currentStep,
-        onboardingStatus: customer.onboardingStatus,
-        documents: customer.kyc.documents
+    try {
+      // Upload files to Cloudinary
+      const uploadPromises = files.map(async (file, index) => {
+        const documentType = req.body.documentTypes?.[index] || 'other';
+        
+        const uploadResult = await cloudinaryService.uploadKYCDocument(
+          file.buffer,
+          documentType,
+          customerId,
+          file.originalname
+        );
+        
+        return {
+          type: documentType,
+          fileName: file.originalname,
+          fileUrl: uploadResult.secure_url,
+          publicId: uploadResult.public_id,
+          fileSize: uploadResult.bytes,
+          format: uploadResult.format,
+          uploadedAt: new Date()
+        };
+      });
+      
+      const documents = await Promise.all(uploadPromises);
+      
+      // Add documents to customer
+      for (const document of documents) {
+        await customer.addKYCDocument(document);
       }
-    });
+      
+      await customer.updateOnboardingStep(3, 'kyc_documents');
+      
+      res.json({
+        success: true,
+        data: {
+          customerId: customer._id,
+          currentStep: customer.currentStep,
+          onboardingStatus: customer.onboardingStatus,
+          documents: customer.kyc.documents
+        }
+      });
+      
+    } catch (uploadError) {
+      console.error('Error uploading to Cloudinary:', uploadError);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to upload documents. Please try again.'
+      });
+    }
   } catch (error) {
     console.error('Error uploading KYC documents:', error);
     res.status(500).json({
@@ -352,7 +370,7 @@ export const completeSignature = async (req: Request, res: Response) => {
       });
     }
     
-    const ipAddress = req.ip || req.connection.remoteAddress || 'unknown';
+    const ipAddress = req.ip || req.socket?.remoteAddress || 'unknown';
     const userAgent = req.get('User-Agent') || 'unknown';
     
     await customer.completeSignature(signatureData, ipAddress, userAgent);
@@ -563,7 +581,7 @@ export const recordConversion = async (req: Request, res: Response) => {
       productId: customer.productId,
       initialSpendAmount: initialSpend,
       sessionId: req.cookies?.affiliate_session,
-      ipAddress: req.ip || req.connection.remoteAddress || 'unknown',
+      ipAddress: req.ip || req.socket?.remoteAddress || 'unknown',
       userAgent: req.get('User-Agent') || 'unknown'
     };
     
@@ -734,6 +752,186 @@ export const updateCustomerStatus = async (req: Request, res: Response) => {
     
   } catch (error) {
     console.error('Error updating customer status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+};
+
+// Skip KYC process and move to completion
+export const skipKYC = async (req: Request, res: Response) => {
+  try {
+    const { customerId } = req.params;
+    
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer not found'
+      });
+    }
+
+    // Get the product to determine onboarding type
+    const product = await Product.findById(customer.productId);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    // Update customer to skip KYC and move to completion
+    const finalStep = product.onboardingType === 'simple' ? 2 : 4;
+    
+    customer.currentStep = finalStep;
+    customer.onboardingStatus = 'completed';
+    customer.completedAt = new Date();
+    
+    // Mark KYC as skipped
+    customer.kyc.status = 'skipped';
+    customer.kyc.skippedAt = new Date();
+    
+    await customer.save();
+    
+    res.json({
+      success: true,
+      data: {
+        customerId: customer._id,
+        currentStep: customer.currentStep,
+        totalSteps: customer.totalSteps,
+        onboardingStatus: customer.onboardingStatus,
+        kycStatus: customer.kyc.status,
+        completedAt: customer.completedAt
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error skipping KYC:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+};
+// Delete KYC document
+export const deleteKYCDocument = async (req: Request, res: Response) => {
+  try {
+    const { customerId, documentId } = req.params;
+    
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer not found'
+      });
+    }
+    
+    // Find the document
+    const documentIndex = customer.kyc.documents.findIndex(
+      doc => doc._id?.toString() === documentId
+    );
+    
+    if (documentIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: 'Document not found'
+      });
+    }
+    
+    const document = customer.kyc.documents[documentIndex];
+    
+    // Delete from Cloudinary if publicId exists
+    if (document.publicId && cloudinaryService.isReady()) {
+      try {
+        await cloudinaryService.deleteFile(document.publicId);
+      } catch (cloudinaryError) {
+        console.error('Error deleting from Cloudinary:', cloudinaryError);
+        // Continue with database deletion even if Cloudinary deletion fails
+      }
+    }
+    
+    // Remove document from customer record
+    customer.kyc.documents.splice(documentIndex, 1);
+    
+    // Update KYC status if no documents remain
+    if (customer.kyc.documents.length === 0) {
+      customer.kyc.status = 'pending';
+    }
+    
+    await customer.save();
+    
+    res.json({
+      success: true,
+      data: {
+        customerId: customer._id,
+        documentsCount: customer.kyc.documents.length,
+        kycStatus: customer.kyc.status
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error deleting KYC document:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error'
+    });
+  }
+};
+
+// Get KYC document details
+export const getKYCDocument = async (req: Request, res: Response) => {
+  try {
+    const { customerId, documentId } = req.params;
+    
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer not found'
+      });
+    }
+    
+    const document = customer.kyc.documents.find(
+      doc => doc._id?.toString() === documentId
+    );
+    
+    if (!document) {
+      return res.status(404).json({
+        success: false,
+        message: 'Document not found'
+      });
+    }
+    
+    // Generate a secure URL with transformations if needed
+    let secureUrl = document.fileUrl;
+    if (document.publicId && cloudinaryService.isReady()) {
+      try {
+        secureUrl = cloudinaryService.generateSecureUrl(document.publicId, [
+          { quality: 'auto:good' },
+          { fetch_format: 'auto' }
+        ]);
+      } catch (error) {
+        console.error('Error generating secure URL:', error);
+        // Fall back to stored URL
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        id: document._id,
+        type: document.type,
+        fileName: document.fileName,
+        fileUrl: secureUrl,
+        fileSize: document.fileSize,
+        format: document.format,
+        uploadedAt: document.uploadedAt
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error getting KYC document:', error);
     res.status(500).json({
       success: false,
       message: 'Internal server error'

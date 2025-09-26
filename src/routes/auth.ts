@@ -42,6 +42,9 @@ router.post('/reset-password', /*authLimiter,*/ AuthController.resetPassword);
 // User info route
 router.get('/me', /*generalLimiter,*/ authenticate, AuthController.getCurrentUser);
 
+// KYC skip route
+router.post('/skip-kyc', /*generalLimiter,*/ authenticate, AuthController.skipKYC);
+
 // Development helper routes
 router.post('/activate-account', AuthController.activateAccount);
 

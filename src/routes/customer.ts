@@ -12,7 +12,10 @@ import {
   getDetailedCustomerStatus,
   getMarketerCustomers,
   getOnboardingAnalytics,
-  updateCustomerStatus
+  updateCustomerStatus,
+  skipKYC,
+  deleteKYCDocument,
+  getKYCDocument
 } from '../controllers/customer';
 
 const router = Router();
@@ -52,5 +55,12 @@ router.get('/marketer/:marketerId/analytics', getOnboardingAnalytics);
 
 // Update customer status (admin only)
 router.put('/:customerId/status', updateCustomerStatus);
+
+// Skip KYC process
+router.post('/onboarding/:customerId/skip-kyc', skipKYC);
+
+// KYC Document Management
+router.get('/onboarding/:customerId/kyc-documents/:documentId', getKYCDocument);
+router.delete('/onboarding/:customerId/kyc-documents/:documentId', deleteKYCDocument);
 
 export default router;

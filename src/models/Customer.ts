@@ -25,16 +25,21 @@ export interface ICustomer extends Document {
   
   // KYC Information
   kyc: {
-    status: 'pending' | 'in_review' | 'approved' | 'rejected';
+    status: 'pending' | 'in_review' | 'approved' | 'rejected' | 'skipped';
     documents: Array<{
+      _id?: string; // Mongoose automatically adds _id to subdocuments
       type: 'government_id' | 'proof_of_address' | 'income_verification' | 'other';
       fileName: string;
       fileUrl: string;
+      publicId?: string; // Cloudinary public ID for file management
+      fileSize?: number; // File size in bytes
+      format?: string; // File format (jpg, png, pdf, etc.)
       uploadedAt: Date;
     }>;
     reviewedAt?: Date;
     reviewedBy?: string;
     rejectionReason?: string;
+    skippedAt?: Date;
   };
   
   // Application Status
@@ -167,7 +172,7 @@ const CustomerSchema = new Schema<ICustomer>({
   kyc: {
     status: {
       type: String,
-      enum: ['pending', 'in_review', 'approved', 'rejected'],
+      enum: ['pending', 'in_review', 'approved', 'rejected', 'skipped'],
       default: 'pending'
     },
     documents: [{
@@ -178,11 +183,15 @@ const CustomerSchema = new Schema<ICustomer>({
       },
       fileName: { type: String, required: true },
       fileUrl: { type: String, required: true },
+      publicId: { type: String }, // Cloudinary public ID for file management
+      fileSize: { type: Number }, // File size in bytes
+      format: { type: String }, // File format (jpg, png, pdf, etc.)
       uploadedAt: { type: Date, default: Date.now }
     }],
     reviewedAt: Date,
     reviewedBy: String,
-    rejectionReason: String
+    rejectionReason: String,
+    skippedAt: Date
   },
   
   // Application Status
@@ -344,8 +353,6 @@ CustomerSchema.methods.updateAdminStatus = function(status: string, reason: stri
 
 CustomerSchema.methods.updatePaymentInfo = function(paymentData: any, reason: string, adminId: string) {
   // Track changes in payment history
-  const changes = [];
-  
   if (paymentData.initialSpendAmount !== undefined && paymentData.initialSpendAmount !== this.initialSpendAmount) {
     this.paymentHistory.push({
       field: 'initialSpendAmount',

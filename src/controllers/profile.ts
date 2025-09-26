@@ -434,6 +434,7 @@ export class ProfileController {
         logger.error('KYC submission error:', error);
         
         if (error.message.includes('Invalid file type') || error.message.includes('File size exceeds') || error.message.includes('UserProfile validation failed')) {
+          
           return res.status(400).json({
             success: false,
             error: error.message

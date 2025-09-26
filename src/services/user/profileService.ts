@@ -1,9 +1,8 @@
 import { UserProfile, IUserProfile, IKYCDocument } from '../../models/UserProfile';
 import { User } from '../../models/User';
 import { logger } from '../../utils/logger';
+import { cloudinaryService } from '../cloudinary';
 import mongoose from 'mongoose';
-import fs from 'fs/promises';
-import path from 'path';
 import crypto from 'crypto';
 
 export interface CreateProfileData {
@@ -57,7 +56,6 @@ export interface KYCReviewData {
 }
 
 export class ProfileService {
-  private static readonly UPLOAD_DIR = process.env.KYC_UPLOAD_DIR || './uploads/kyc';
   private static readonly ALLOWED_MIME_TYPES = [
     'image/jpeg',
     'image/png',
@@ -162,7 +160,7 @@ export class ProfileService {
   }
 
   /**
-   * Upload KYC document with encryption
+   * Upload KYC document to Cloudinary with encryption
    */
   static async uploadKYCDocument(userId: string, documentData: KYCDocumentUpload): Promise<IUserProfile> {
     try {
@@ -180,48 +178,58 @@ export class ProfileService {
         throw new Error('Profile not found');
       }
 
-      // Ensure upload directory exists
-      await fs.mkdir(this.UPLOAD_DIR, { recursive: true });
+      // Check if Cloudinary is configured
+      if (!cloudinaryService.isReady()) {
+        throw new Error('File upload service is not configured. Please contact support.');
+      }
 
-      // Generate unique filename and encryption key
-      const fileExtension = path.extname(documentData.originalName);
-      const uniqueFilename = `${crypto.randomUUID()}${fileExtension}`;
+      // Generate encryption key and IV for file content
       const encryptionKey = crypto.randomBytes(32);
       const iv = crypto.randomBytes(16);
 
-      // Encrypt file content
+      // Encrypt file content before uploading to Cloudinary
       const cipher = crypto.createCipheriv('aes-256-cbc', encryptionKey, iv);
       const encryptedBuffer = Buffer.concat([
+        iv, // Prepend IV to encrypted data for decryption
         cipher.update(documentData.buffer),
         cipher.final()
       ]);
 
-      // Save encrypted file
-      const filePath = path.join(this.UPLOAD_DIR, uniqueFilename);
-      await fs.writeFile(filePath, encryptedBuffer);
+      try {
+        // Upload encrypted file to Cloudinary
+        const uploadResult = await cloudinaryService.uploadKYCDocument(
+          encryptedBuffer,
+          documentData.type,
+          userId,
+          documentData.originalName
+        );
 
-      // Add document to profile
-      const kycDocument: Omit<IKYCDocument, 'uploadedAt' | 'status'> = {
-        type: documentData.type,
-        filename: uniqueFilename,
-        originalName: documentData.originalName,
-        encryptedPath: filePath,
-        encryptionKey: encryptionKey.toString('hex'),
-        mimeType: documentData.mimeType,
-        size: documentData.buffer.length
-      };
+        // Add document to profile with Cloudinary information
+        const kycDocument: Omit<IKYCDocument, 'uploadedAt' | 'status'> = {
+          type: documentData.type,
+          filename: uploadResult.public_id, // Use Cloudinary public_id as filename
+          originalName: documentData.originalName,
+          encryptedPath: uploadResult.secure_url, // Store Cloudinary URL instead of local path
+          encryptionKey: encryptionKey.toString('hex'),
+          mimeType: documentData.mimeType,
+          size: documentData.buffer.length // Store original file size, not encrypted size
+        };
 
-      profile.addKYCDocument(kycDocument);
+        profile.addKYCDocument(kycDocument);
 
-      // Update KYC status to in_review if this is the first document
-      if (profile.kycStatus === 'pending') {
-        profile.updateKYCStatus('in_review');
+        // Update KYC status to in_review if this is the first document
+        if (profile.kycStatus === 'pending') {
+          profile.updateKYCStatus('in_review');
+        }
+
+        await profile.save();
+        logger.info(`KYC document uploaded to Cloudinary for user ${userId}: ${documentData.type}`);
+        
+        return profile;
+      } catch (uploadError) {
+        logger.error('Error uploading to Cloudinary:', uploadError);
+        throw new Error('Failed to upload document. Please try again.');
       }
-
-      await profile.save();
-      logger.info(`KYC document uploaded for user ${userId}: ${documentData.type}`);
-      
-      return profile;
     } catch (error) {
       logger.error('Error uploading KYC document:', error);
       throw error;
@@ -229,7 +237,7 @@ export class ProfileService {
   }
 
   /**
-   * Get decrypted KYC document (admin only)
+   * Get decrypted KYC document from Cloudinary (admin only)
    */
   static async getKYCDocument(userId: string, documentId: string, requesterId: string): Promise<Buffer> {
     try {
@@ -249,21 +257,33 @@ export class ProfileService {
         throw new Error('Document not found');
       }
 
-      // Read and decrypt file
-      const encryptedBuffer = await fs.readFile(document.encryptedPath);
-      const encryptionKey = Buffer.from(document.encryptionKey, 'hex');
-      
-      // For file decryption, we need to extract the IV from the encrypted data
-      // In a real implementation, you'd store IV separately or prepend it to the encrypted data
-      const iv = crypto.randomBytes(16); // This is a simplified approach for testing
-      const decipher = crypto.createDecipheriv('aes-256-cbc', encryptionKey, iv);
-      const decryptedBuffer = Buffer.concat([
-        decipher.update(encryptedBuffer),
-        decipher.final()
-      ]);
+      try {
+        // Download encrypted file from Cloudinary
+        const response = await fetch(document.encryptedPath);
+        if (!response.ok) {
+          throw new Error(`Failed to download file: ${response.statusText}`);
+        }
+        
+        const encryptedBuffer = Buffer.from(await response.arrayBuffer());
+        const encryptionKey = Buffer.from(document.encryptionKey, 'hex');
+        
+        // Extract IV from the beginning of the encrypted data (first 16 bytes)
+        const iv = encryptedBuffer.subarray(0, 16);
+        const encryptedData = encryptedBuffer.subarray(16);
+        
+        // Decrypt file content
+        const decipher = crypto.createDecipheriv('aes-256-cbc', encryptionKey, iv);
+        const decryptedBuffer = Buffer.concat([
+          decipher.update(encryptedData),
+          decipher.final()
+        ]);
 
-      logger.info(`KYC document accessed by admin ${requesterId} for user ${userId}`);
-      return decryptedBuffer;
+        logger.info(`KYC document accessed by admin ${requesterId} for user ${userId}`);
+        return decryptedBuffer;
+      } catch (downloadError) {
+        logger.error('Error downloading/decrypting document from Cloudinary:', downloadError);
+        throw new Error('Failed to retrieve document. Please try again.');
+      }
     } catch (error) {
       logger.error('Error retrieving KYC document:', error);
       throw error;
@@ -363,7 +383,49 @@ export class ProfileService {
   }
 
   /**
-   * Delete KYC document
+   * Get KYC document secure URL (for admin preview without decryption)
+   */
+  static async getKYCDocumentUrl(userId: string, documentId: string, requesterId: string): Promise<string> {
+    try {
+      // Verify requester is admin
+      const requester = await User.findById(requesterId);
+      if (!requester || requester.role !== 'admin') {
+        throw new Error('Unauthorized: Admin access required');
+      }
+
+      const profile = await UserProfile.findOne({ userId });
+      if (!profile) {
+        throw new Error('Profile not found');
+      }
+
+      const document = profile.kycDocuments.find(doc => doc._id?.toString() === documentId);
+      if (!document) {
+        throw new Error('Document not found');
+      }
+
+      // Generate a secure URL with transformations if Cloudinary is available
+      if (cloudinaryService.isReady()) {
+        try {
+          const secureUrl = cloudinaryService.generateSecureUrl(document.filename, [
+            { quality: 'auto:good' },
+            { fetch_format: 'auto' }
+          ]);
+          return secureUrl;
+        } catch (error) {
+          logger.warn('Error generating secure URL, falling back to stored URL:', error);
+        }
+      }
+
+      // Fallback to stored URL
+      return document.encryptedPath;
+    } catch (error) {
+      logger.error('Error getting KYC document URL:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete KYC document from Cloudinary
    */
   static async deleteKYCDocument(userId: string, documentId: string): Promise<IUserProfile> {
     try {
@@ -379,11 +441,14 @@ export class ProfileService {
 
       const document = profile.kycDocuments[documentIndex];
 
-      // Delete file from filesystem
-      try {
-        await fs.unlink(document.encryptedPath);
-      } catch (fileError) {
-        logger.warn(`Could not delete file ${document.encryptedPath}:`, fileError);
+      // Delete file from Cloudinary if service is available
+      if (cloudinaryService.isReady()) {
+        try {
+          await cloudinaryService.deleteFile(document.filename); // filename contains the public_id
+        } catch (cloudinaryError) {
+          logger.warn(`Could not delete file from Cloudinary ${document.filename}:`, cloudinaryError);
+          // Continue with database deletion even if Cloudinary deletion fails
+        }
       }
 
       // Remove document from profile

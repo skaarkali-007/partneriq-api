@@ -20,6 +20,10 @@ export interface IUser extends Document {
   mfaSecret?: string;
   mfaBackupCodes?: string[];
   mfaSetupCompleted: boolean;
+  // KYC fields
+  kycRequired: boolean;
+  kycCompleted: boolean;
+  kycSkipped: boolean;
   createdAt: Date;
   updatedAt: Date;
   
@@ -101,6 +105,19 @@ const userSchema = new Schema<IUser>({
     select: false // Don't include in queries by default
   },
   mfaSetupCompleted: {
+    type: Boolean,
+    default: false
+  },
+  // KYC fields
+  kycRequired: {
+    type: Boolean,
+    default: true // KYC is required by default for marketers
+  },
+  kycCompleted: {
+    type: Boolean,
+    default: false
+  },
+  kycSkipped: {
     type: Boolean,
     default: false
   }

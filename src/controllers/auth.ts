@@ -484,6 +484,9 @@ export class AuthController {
           lastLogin: user.lastLogin,
           mfaEnabled: mfaStatus.mfaEnabled,
           mfaSetupCompleted: mfaStatus.mfaSetupCompleted,
+          kycRequired: user.kycRequired,
+          kycCompleted: user.kycCompleted,
+          kycSkipped: user.kycSkipped,
           createdAt: user.createdAt,
           updatedAt: user.updatedAt
         }
@@ -493,6 +496,62 @@ export class AuthController {
       res.status(500).json({
         success: false,
         error: 'Failed to get user information'
+      });
+    }
+  }
+
+  static async skipKYC(req: AuthenticatedRequest, res: Response) {
+    try {
+      const user = req.user;
+      
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          error: 'User not authenticated'
+        });
+      }
+
+      // Only allow marketers to skip KYC (admins don't need KYC)
+      if (user.role !== 'marketer') {
+        return res.status(403).json({
+          success: false,
+          error: 'KYC skip is only available for marketer accounts'
+        });
+      }
+
+      // Update user to mark KYC as skipped
+      const updatedUser = await User.findByIdAndUpdate(
+        user._id,
+        {
+          kycSkipped: true,
+          kycRequired: false // No longer required since it's skipped
+        },
+        { new: true }
+      );
+
+      if (!updatedUser) {
+        return res.status(404).json({
+          success: false,
+          error: 'User not found'
+        });
+      }
+
+      logger.info(`User ${user.email} skipped KYC verification`);
+
+      res.json({
+        success: true,
+        message: 'KYC verification skipped successfully',
+        data: {
+          kycRequired: updatedUser.kycRequired,
+          kycCompleted: updatedUser.kycCompleted,
+          kycSkipped: updatedUser.kycSkipped
+        }
+      });
+    } catch (error: any) {
+      logger.error('Skip KYC error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to skip KYC verification'
       });
     }
   }

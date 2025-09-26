@@ -4,9 +4,9 @@ import crypto from 'crypto';
 export interface IKYCDocument {
   _id?: mongoose.Types.ObjectId;
   type: 'government_id' | 'proof_of_address' | 'selfie' | 'other';
-  filename: string;
+  filename: string; // Cloudinary public_id
   originalName: string;
-  encryptedPath: string;
+  encryptedPath: string; // Cloudinary secure URL
   encryptionKey: string;
   mimeType: string;
   size: number;
