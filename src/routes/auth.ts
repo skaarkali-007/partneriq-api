@@ -46,6 +46,7 @@ router.get('/me', /*generalLimiter,*/ authenticate, AuthController.getCurrentUse
 router.post('/skip-kyc', /*generalLimiter,*/ authenticate, AuthController.skipKYC);
 
 // Development helper routes
+router.get('/check-environment', AuthController.checkEnvironment);
 router.post('/activate-account', AuthController.activateAccount);
 
 export default router;

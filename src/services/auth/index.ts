@@ -31,6 +31,10 @@ export class AuthService {
         throw new Error('User with this email already exists');
       }
 
+      // Check if we're in alpha stage for auto-verification
+      const isAlphaStage = process.env.STAGE === 'alpha';
+      logger.info(`Registration stage check: STAGE=${process.env.STAGE}, isAlphaStage=${isAlphaStage}`);
+
       // Create new user
       const user = new User({
         email: userData.email,
@@ -38,16 +42,21 @@ export class AuthService {
         firstName: userData.firstName,
         lastName: userData.lastName,
         role: userData.role || 'marketer',
-        status: 'pending', // Always pending until email is verified
-        emailVerified: false // Always false until OTP is verified
+        status: isAlphaStage ? 'active' : 'pending', // Auto-activate in alpha stage
+        emailVerified: isAlphaStage, // Auto-verify email in alpha stage
+        createdInAlphaStage: isAlphaStage // Track if created during alpha stage
       });
 
-      // Generate email verification token
+      // Generate email verification token (still needed for non-alpha stages)
       const verificationToken = user.generateEmailVerificationToken();
       
       await user.save();
       
-      logger.info(`User registered: ${user.email}`);
+      if (isAlphaStage) {
+        logger.info(`User registered and auto-verified (alpha stage): ${user.email}`);
+      } else {
+        logger.info(`User registered: ${user.email}`);
+      }
       
       return { user, verificationToken };
     } catch (error) {
@@ -76,8 +85,10 @@ export class AuthService {
         throw new Error('Account is not active. Please contact support.');
       }
 
-      // Check if email is verified
-      if (!user.emailVerified) {
+      // Check if email is verified (skip in alpha stage)
+      const isAlphaStage = process.env.STAGE === 'alpha';
+      logger.info(`Login stage check: STAGE=${process.env.STAGE}, isAlphaStage=${isAlphaStage}, emailVerified=${user.emailVerified}`);
+      if (!user.emailVerified && !isAlphaStage) {
         throw new Error('Please verify your email before logging in');
       }
 

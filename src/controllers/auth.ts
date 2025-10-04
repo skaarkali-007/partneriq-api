@@ -58,38 +58,55 @@ export class AuthController {
 
       const { user, verificationToken } = await AuthService.registerUser(req.body);
 
-      // Automatically send OTP for email verification
-      try {
-        // Generate OTP for immediate verification
-        const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit OTP
-        const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-        
-        // Store OTP in user document
-        user.emailVerificationToken = crypto.createHash('sha256').update(otp).digest('hex');
-        user.emailVerificationExpires = otpExpires;
-        await user.save();
-        
-        // Send OTP email
-        await sendOTPEmail(user.email, otp);
-        
-        logger.info(`OTP sent to ${user.email} during registration`);
-      } catch (emailError) {
-        logger.error('Failed to send registration OTP:', emailError);
-        // Don't fail registration if email fails, but log it
+      // Check if we're in alpha stage
+      const isAlphaStage = process.env.STAGE === 'alpha';
+      logger.info(`Auth controller stage check: STAGE=${process.env.STAGE}, isAlphaStage=${isAlphaStage}`);
+
+      if (!isAlphaStage) {
+        // Automatically send OTP for email verification (non-alpha stages)
+        try {
+          // Generate OTP for immediate verification
+          const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit OTP
+          const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+          
+          // Store OTP in user document
+          user.emailVerificationToken = crypto.createHash('sha256').update(otp).digest('hex');
+          user.emailVerificationExpires = otpExpires;
+          await user.save();
+          
+          // Send OTP email
+          await sendOTPEmail(user.email, otp);
+          
+          logger.info(`OTP sent to ${user.email} during registration`);
+        } catch (emailError) {
+          logger.error('Failed to send registration OTP:', emailError);
+          // Don't fail registration if email fails, but log it
+        }
+      }
+
+      // Generate tokens for alpha stage users
+      let tokens = null;
+      if (isAlphaStage) {
+        const { generateTokenPair } = require('../utils/jwt');
+        tokens = generateTokenPair(user);
       }
 
       res.status(201).json({
         success: true,
-        message: 'Registration successful! Please check your email for the 6-digit verification code.',
+        message: isAlphaStage 
+          ? 'Registration successful! Your account is ready to use.' 
+          : 'Registration successful! Please check your email for the 6-digit verification code.',
         data: {
           user: {
             id: user._id,
             email: user.email,
             role: user.role,
             status: user.status,
-            emailVerified: user.emailVerified
+            emailVerified: user.emailVerified,
+            createdInAlphaStage: user.createdInAlphaStage
           },
-          emailVerificationRequired: true
+          emailVerificationRequired: !isAlphaStage,
+          ...(tokens && { tokens })
         }
       });
     } catch (error: any) {
@@ -133,7 +150,8 @@ export class AuthController {
             emailVerified: user.emailVerified,
             lastLogin: user.lastLogin,
             mfaEnabled: mfaStatus.mfaEnabled,
-            mfaSetupCompleted: mfaStatus.mfaSetupCompleted
+            mfaSetupCompleted: mfaStatus.mfaSetupCompleted,
+            createdInAlphaStage: user.createdInAlphaStage
           },
           tokens
         }
@@ -209,6 +227,33 @@ export class AuthController {
       res.status(400).json({
         success: false,
         error: error.message || 'Email verification failed'
+      });
+    }
+  }
+
+  // Development helper endpoint to check environment
+  static async checkEnvironment(req: Request, res: Response) {
+    try {
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(403).json({
+          success: false,
+          error: 'This endpoint is only available in development mode'
+        });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          NODE_ENV: process.env.NODE_ENV,
+          STAGE: process.env.STAGE,
+          isAlphaStage: process.env.STAGE === 'alpha'
+        }
+      });
+    } catch (error: any) {
+      logger.error('Environment check error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Environment check failed'
       });
     }
   }
@@ -487,6 +532,7 @@ export class AuthController {
           kycRequired: user.kycRequired,
           kycCompleted: user.kycCompleted,
           kycSkipped: user.kycSkipped,
+          createdInAlphaStage: user.createdInAlphaStage,
           createdAt: user.createdAt,
           updatedAt: user.updatedAt
         }

@@ -24,6 +24,8 @@ export interface IUser extends Document {
   kycRequired: boolean;
   kycCompleted: boolean;
   kycSkipped: boolean;
+  // Alpha stage tracking
+  createdInAlphaStage: boolean;
   createdAt: Date;
   updatedAt: Date;
   
@@ -118,6 +120,11 @@ const userSchema = new Schema<IUser>({
     default: false
   },
   kycSkipped: {
+    type: Boolean,
+    default: false
+  },
+  // Alpha stage tracking
+  createdInAlphaStage: {
     type: Boolean,
     default: false
   }
